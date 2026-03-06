@@ -5,6 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "adversarial-robustness-toolbox>=1.20.1",
+    "adversarial-robustness-toolbox[pytorch-image]>=1.20.1",
     "avalanche-lib>=0.6.0",
 ]

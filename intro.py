@@ -3,7 +3,9 @@ import torch
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 from avalanche.models import SimpleMLP
-from avalanche.training.supervised import Naive, CWRStar, Replay, GDumb, Cumulative, LwF, GEM, AGEM, EWC
+from avalanche.training.supervised import Naive#, CWRStar, Replay, GDumb, Cumulative, LwF, GEM, AGEM, EWC
+from avalanche.training.plugins import GEMPlugin, ReplayPlugin
+from avalanche.training import ReservoirSamplingBuffer
 from avalanche.benchmarks.classic import SplitMNIST
 from art.attacks.poisoning.backdoor_attack import PoisoningAttackBackdoor
 from art.attacks.poisoning.perturbations import add_pattern_bd
@@ -13,7 +15,7 @@ from utils import PoisoningPlugin
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = SimpleMLP(num_classes=10)
+model = SimpleMLP(num_classes=10).to(device)
 optimizer = SGD(model.parameters(), lr=.001, momentum=.9)
 criterion = CrossEntropyLoss()
 
@@ -22,14 +24,25 @@ def perturbation(x):
 
 test = PoisoningAttackBackdoor(perturbation=perturbation)
 
-test_p = PoisoningPlugin(attack=test, poison_to=1, batch_size=256)
+test_p = PoisoningPlugin(attack=test, poison_to=1)
 
-cl_strategy = GEM(
+gem = GEMPlugin(
+    patterns_per_experience=10,
+    memory_strength=.5
+    )
+
+buffer = ReservoirSamplingBuffer(max_size=10)
+
+replay = ReplayPlugin(
+    mem_size=10,
+    storage_policy= buffer
+)
+
+cl_strategy = Naive(
     model, optimizer, criterion,
-    patterns_per_exp=10,
     train_mb_size=100, train_epochs=4, eval_mb_size=100,
     device=device,
-    plugins=[test_p]
+    plugins=[replay, test_p],
 )
 
 benchmark = SplitMNIST(n_experiences=5, seed=1)
