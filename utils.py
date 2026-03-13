@@ -11,7 +11,7 @@ from avalanche.benchmarks.utils import as_taskaware_classification_dataset, Aval
 from avalanche.benchmarks.scenarios.deprecated.new_classes import NCExperience
 from art.attacks.attack import PoisoningAttack
 
-import numpy as np
+from pacol import PACOL
 
 
 class PoisoningPlugin(SupervisedPlugin):
@@ -21,7 +21,7 @@ class PoisoningPlugin(SupervisedPlugin):
 
     def __init__(
             self,
-            attack: PoisoningAttack,
+            attack: PACOL,
             poison_to: int = 1,
             pcp: float = .5,
             pn: int = 1,
@@ -45,6 +45,7 @@ class PoisoningPlugin(SupervisedPlugin):
         self.target_grad = True
         self.original_data = None
 
+
     def _poison_data(self, dataset, batch_size = None):
         if self.restore:
             self.original_data = dataset
@@ -65,7 +66,7 @@ class PoisoningPlugin(SupervisedPlugin):
             if poison_n > 0:
                 p_x = x[:poison_n].detach().cpu().numpy()
                 p_y = y[:poison_n].detach().cpu().numpy()
-                p_x, p_y = self.attack.poison(p_x, p_y)
+                p_x, p_y = self.attack(p_x, p_y)
                 x[:poison_n] = torch.tensor(p_x, dtype=x.dtype)
                 y[:poison_n] = torch.tensor(p_y, dtype=y.dtype)
             all_x.append(x)
@@ -111,16 +112,20 @@ class PoisoningPlugin(SupervisedPlugin):
             return
 
         for p in strategy.plugins:
-            if hasattr(p, "update_memory"):
+            if hasattr(p, "memory_x"):
                 device = p.memory_x[t].device
                 p_x = p.memory_x[t].detach().cpu().numpy()
                 p_y = p.memory_y[t].detach().cpu().numpy()
                 poison_n = int(p_x.shape[0] * self.pp)
 
-                p_x, p_y = self.attack.poison(p_x[:poison_n], p_y[:poison_n])
+                p_x, p_y = self.attack(p_x[:poison_n], p_y[:poison_n])
 
                 p.memory_x[t][:poison_n] = torch.tensor(p_x, dtype=p.memory_x[t].dtype, device=device)
                 p.memory_y[t][:poison_n] = torch.tensor(p_y, dtype=p.memory_y[t].dtype, device=device)
+            elif hasattr(p, "buffer"):
+                strategy.experience.dataset = self._poison_data(strategy.experience.dataset)
+            elif hasattr(p, "storage_policy"):
+                strategy.adapted_dataset = self._poison_data(strategy.experience.dataset)
         return 
 
     

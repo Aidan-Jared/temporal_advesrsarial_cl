@@ -42,7 +42,7 @@ cl_strategy = Naive(
     model, optimizer, criterion,
     train_mb_size=100, train_epochs=4, eval_mb_size=100,
     device=device,
-    plugins=[replay, test_p],
+    plugins=[test_p, replay],
 )
 
 benchmark = SplitMNIST(n_experiences=5, seed=1)
