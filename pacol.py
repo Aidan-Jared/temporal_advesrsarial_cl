@@ -1,96 +1,102 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
+
 
 class PACOL:
     def __init__(
-            self,
-            eps: float,
-            steps: int,
-            step_size: int,
-            iterations: int,
-            dist_metric: str,
-            loss_fn: nn.Module,
-            opt: torch.optim.Optimizer,
-            batch_size: int,
+        self,
+        eps: float,
+        steps: int,
+        step_size: float,
+        iterations: int,
+        dist_metric: str,
+        model: nn.Module,
+        loss_fn: nn.Module,
+        opt: torch.optim.Optimizer,
+        batch_size: int,
     ):
-        self.eps = eps
-        self.S = steps
-        self.alpha = step_size
-        self.K = iterations
-        self.dist_metric = dist_metric
-        self.loss_fn = loss_fn
-        self.opt = opt
-        self.batch_size = batch_size
-        
+        self.eps: float = eps
+        self.S: int = steps
+        self.alpha: float = step_size
+        self.K: int = iterations
+        self.dist_metric: str = dist_metric
+        self.model: nn.Module = model
+        self.loss_fn: nn.Module = loss_fn
+        self.opt: torch.optim.Optimizer = opt
+        self.batch_size: int = batch_size
 
     def _dist(self, label_grad: torch.Tensor, x_grad: torch.Tensor):
 
         label_grad = label_grad.detach()
         if self.dist_metric == "cosine":
-            H = F.cosine_similarity(label_grad.unsqueeze(0), x_grad.unsqueeze(0))
+            H: torch.Tensor = F.cosine_similarity(
+                label_grad.unsqueeze(0), x_grad.unsqueeze(0)
+            )
         else:
-            H = torch.norm(label_grad - x_grad)
+            H: torch.Tensor = torch.norm(label_grad - x_grad)
         return H
-    
-    def _grads(
-            self,
-            X: torch.Tensor,
-            y: torch.Tensor,
-            model: nn.Module
-    ):      
-        model.zero_grad()  
-        loss = self.loss_fn(model(X), y)
-        loss.backward(retain_graph = True)
 
-        return torch.cat([p.grad.flatten() for p in model.parameters()])
+    def _grads(self, X: torch.Tensor, y: torch.Tensor):
+        self.model.zero_grad()
+        loss = self.loss_fn(self.model(X), y)
 
+        grads = torch.autograd.grad(
+            outputs=loss, inputs=[p for p in self.model.parameters()], create_graph=True
+        )
 
-    
+        return torch.cat([g.flatten() for g in grads])
+
     def __call__(
-            self,
-            flip_data: Dataset,
-            adv_data: Dataset,
-            model: nn.Module,
+        self,
+        flip_data: Dataset[torch.Tensor],
+        adv_data: list[torch.Tensor],
     ):
 
+        collate_fn = getattr(flip_data, "collate_fn", None)
+
         flip_data = DataLoader(
-            flip_data,
-            batch_size=self.batch_size,
-            shuffle=True,
-            )
-    
-        for _ in range(self.K):
-            X, y = next(iter(flip_data))
+            flip_data, batch_size=self.batch_size, shuffle=True, collate_fn=None
+        )
+
+        device = next(self.model.parameters()).device
+
+        for i, (X, _, y) in enumerate(flip_data):
+            if i > self.K:
+                break
+            X = X.to(device)
+            y = y.to(device)
             grad_flip = self._grads(X, y)
 
             for idx in range(self.S):
-                start = idx * self.batch_size
-                end = start + self.batch_size
-                X, y = adv_data[start:end]
-                X_orig = X.clone().detach()
-                X = X.detach().requires_grad_(True)
+                start: int = idx * self.batch_size
+                end: int = start + self.batch_size
+                X: torch.Tensor = adv_data[0][start:end].to(device)
+                y: torch.Tensor = adv_data[1][start:end].to(device)
+                X_orig: torch.Tensor = X.clone().detach()
+                X: torch.Tensor = X.detach().requires_grad_(True)
 
+                grad_adv: torch.Tensor = self._grads(X, y)
 
-                grad_adv = self._grads(X, y)
-
-                H = self._dist(grad_flip, grad_adv)
+                H: torch.Tensor = self._dist(grad_flip, grad_adv)
                 H.backward()
 
                 with torch.no_grad():
-                    X = torch.clamp(
-                        (X + self.alpha * X.grad.sign()), 
+                    X: torch.Tensor = torch.clamp(
+                        (X + self.alpha * X.grad.sign()),
                         min=X_orig - self.eps,
-                        max=X_orig+ self.eps
+                        max=X_orig + self.eps,
                     )
-                    X = torch.clamp(X, 0.,1.)
-                adv_data.X[start:end] = X
-            
-            model.zero_grad()
-            X, y = adv_data[0:self.batch_size]
-            loss = self.loss_fn(model(X), y)
+                    # X: torch.Tensor = torch.clamp(X, 0.0, 1.0)
+
+                adv_data[0][start:end] = X.clone().detach()
+                adv_data[1][start:end] = y.clone().detach()
+
+            self.model.zero_grad()
+            X = adv_data[0][0 : self.batch_size].to(device)
+            y = adv_data[1][0 : self.batch_size].to(device)
+            loss = self.loss_fn(self.model(X), y)
             loss.backward()
             self.opt.step()
-        return adv_data
-                
+        return adv_data[0], adv_data[1]
