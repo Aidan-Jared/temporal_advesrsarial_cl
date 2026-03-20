@@ -57,25 +57,25 @@ class PACOL:
         collate_fn = getattr(flip_data, "collate_fn", None)
 
         flip_data = DataLoader(
-            flip_data, batch_size=self.batch_size, shuffle=True, collate_fn=None
+            flip_data, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn
         )
 
         device = next(self.model.parameters()).device
 
-        for i, (X, _, y) in enumerate(flip_data):
+        for i, (X_f, _, y_f) in enumerate(flip_data):
             if i > self.K:
                 break
-            X = X.to(device)
-            y = y.to(device)
-            grad_flip = self._grads(X, y)
+            X_f = X_f.to(device)
+            y_f = y_f.to(device)
+            grad_flip = self._grads(X_f, y_f)
 
             for idx in range(self.S):
                 start: int = idx * self.batch_size
                 end: int = start + self.batch_size
-                X: torch.Tensor = adv_data[0][start:end].to(device)
-                y: torch.Tensor = adv_data[1][start:end].to(device)
-                X_orig: torch.Tensor = X.clone().detach()
-                X: torch.Tensor = X.detach().requires_grad_(True)
+                X = adv_data[0][start:end].to(device)
+                y = adv_data[1][start:end].to(device)
+                X_orig = X.clone().detach()
+                X = X.detach().requires_grad_(True)
 
                 grad_adv: torch.Tensor = self._grads(X, y)
 
