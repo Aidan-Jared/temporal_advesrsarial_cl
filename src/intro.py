@@ -1,3 +1,4 @@
+import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -13,8 +14,8 @@ from avalanche.training.supervised import (
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam
 
-from pacol import PACOL
-from utils import PoisoningPlugin
+from src.pacol import PACOL
+from src.utils import PoisoningPlugin
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,7 +25,7 @@ criterion = CrossEntropyLoss()
 
 
 # def perturbation(x):
-#     return add_pattern_bd(x, pixel_value=1, channels_first=True)
+# return add_pattern_bd(x, pixel_value=1, channels_first=True)
 
 p_model = SimpleMLP(num_classes=10).to(device)
 
@@ -99,5 +100,6 @@ for experience in benchmark.train_stream:
 
 
 print("Results:")
-print(results["poisoned"][-1])
-print(results["clean"][-1])
+
+print(pd.DataFrame.from_dict(results["poisoned"][-1], orient="index"))
+print(pd.DataFrame.from_dict(results["clean"][-1], orient="index"))

@@ -31,11 +31,9 @@ class PACOL:
 
         label_grad = label_grad.detach()
         if self.dist_metric == "cosine":
-            H: torch.Tensor = F.cosine_similarity(
-                label_grad.unsqueeze(0), x_grad.unsqueeze(0)
-            )
+            H = F.cosine_similarity(label_grad.unsqueeze(0), x_grad.unsqueeze(0))
         else:
-            H: torch.Tensor = torch.norm(label_grad - x_grad)
+            H = torch.norm(label_grad - x_grad)
         return H
 
     def _grads(self, X: torch.Tensor, y: torch.Tensor):
