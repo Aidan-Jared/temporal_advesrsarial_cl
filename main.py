@@ -1,7 +1,7 @@
 import equinox as eqx
 import jax
 import optax
-import polars as pl
+import pandas as pd
 import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR10
 
@@ -42,15 +42,15 @@ def main():
     # p_model = ResNet18(3, key=subkey3)
     p_model, state = eqx.nn.make_with_state(ResNet18)(3, key=subkey3)
     # c_model = ResNet18(3, key=subkey3)
-    optim = optax.adam(learning_rate=1e-3)
+    optim = optax.adam(learning_rate=1e-4)
     criterion = optax.softmax_cross_entropy_with_integer_labels
 
     p_model, results = EWC_train(
-        p_model, state, trainloader, testloader, optim, criterion, 3, 5, 10, key=subkey1
+        p_model, state, trainloader, testloader, optim, 3e9, criterion, 3, 5, 10, key=subkey1
     )
 
-    df = pl.from_dicts(results)
-    df.write_parquet("ewc_results.parquet")
+    df = pd.DataFrame(results)
+    df.to_parquet("ewc_results.parquet")
     print(df)
 
 

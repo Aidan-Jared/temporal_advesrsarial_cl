@@ -97,7 +97,7 @@ class BasicBlock(eqx.Module):
 
     def __call__(
         self,
-        x: Float[Array, "batch c w h"],
+        x: Float[Array, " batch c w h"],
         state: PyTree,
         *,
         key: PRNGKeyArray | None = None,
@@ -120,8 +120,8 @@ class BasicBlock(eqx.Module):
             identity = x
 
         # def _shortcut(x, state):
-        #     i = self.shortcut[0](x)  # type: ignore
-        #     i, s = self.shortcut[1](i, state)  # type: ignore
+        #     i = self.shortcut[0](x)
+        #     i, s = self.shortcut[1](i, state) 
         #     return i, s
 
         # identity, state = jax.lax.cond(

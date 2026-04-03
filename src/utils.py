@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
+# import optax
 import torch
 
 # from art.attacks.attack import PoisoningAttack

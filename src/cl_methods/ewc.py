@@ -1,3 +1,4 @@
+
 from tqdm import tqdm
 from typing import Callable
 
@@ -36,7 +37,7 @@ def compute_importance(
             logits = forward(model, x, state, key)
             loss = jax.nn.log_softmax(logits)
 
-            return -jnp.take(loss, y)
+            return -loss[y]
 
         grads = jax.vmap(
             eqx.filter_grad(loss_fn),
@@ -55,6 +56,9 @@ def compute_importance(
         if step == batches - 1:
             break
 
+    # imp_magnitude = jax.tree_util.tree_leaves(importance)
+    # jax.debug.print("mean importance: {x}", x = imp_magnitude)
+    # jax.debug.breakpoint()
     importance = jax.tree.map(
         lambda i: i / float(batches * data.batch_size), importance
     )
@@ -81,6 +85,7 @@ def ECW_penalty(
         for exp in range(task):
             saved_param = saved_params[exp]
             imp = importances[exp]
+
             
             penalty += jnp.sum(
                 jnp.array(
@@ -112,30 +117,26 @@ def EWC_loss(
     lambda_: float,
 ) -> tuple[Array, tuple[Array, State]]:
 
-    def loss_fn(model, state, key, criteron, importances, saved_params, lambda_):
-        key, *keys = jax.random.split(key, x.shape[0] + 1)
-        keys = jnp.vstack(keys)
+    key, *keys = jax.random.split(key, x.shape[0] + 1)
+    keys = jnp.vstack(keys)
 
-        def forward(x, state, key):
-            logits, state = model(x, state=state, key=key)
-            return logits, state
+    def forward(x, state, key):
+        logits, state = model(x, state=state, key=key)  # type: ignore
+        return logits, state
 
-        logits, state = jax.vmap(
-            forward, axis_name="batch", in_axes=(0, None, 0), out_axes=(0, None)
-        )(x, state, keys)
+    logits, state = jax.vmap(
+        forward, axis_name="batch", in_axes=(0, None, 0), out_axes=(0, None)
+    )(x, state, keys)
 
-        loss = criteron(logits, y)
-        params, _ = eqx.partition(model, eqx.is_array)
-        loss = jnp.mean(loss) + lambda_ * ECW_penalty(
-            importances, saved_params, params, task
-        )
+    loss = criteron(logits, y)
+    params, _ = eqx.partition(model, eqx.is_array)
+    loss = jnp.mean(loss) + lambda_ * ECW_penalty(
+        importances, saved_params, params, task
+    )
 
-        pred_y = jnp.argmax(logits, axis=1)
-        acc = jnp.mean(y == pred_y)
-        return jnp.squeeze(loss), (acc, state)
-
-    return loss_fn(model, state, key, criteron, importances, saved_params, lambda_)
-
+    pred_y = jnp.argmax(logits, axis=1)
+    acc = jnp.mean(y == pred_y)
+    return jnp.squeeze(loss), (acc, state)
 
 def EWC_train(
     model: eqx.Module,
@@ -143,6 +144,7 @@ def EWC_train(
     trainloader: CL_DataLoader,
     testloader: CL_DataLoader,
     optim,
+    lambda_: float,
     criterion: Callable,
     task_epochs: int,
     tasks: int,
@@ -150,7 +152,6 @@ def EWC_train(
     *,
     key: PRNGKeyArray,
 ):
-    opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
     importances: dict[int, PyTree] = dict()
     saved_params: dict[int, PyTree] = dict()
     results = []
@@ -158,7 +159,7 @@ def EWC_train(
     for task in range(tasks):
         task_loss = []
         task_acc = []
-        
+        opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
         model = eqx.nn.inference_mode(model, value=False)
 
         params, static = eqx.partition(model, eqx.is_array)
@@ -177,7 +178,7 @@ def EWC_train(
                     importances=importances,
                     saved_params=saved_params,
                     task=task,
-                    lambda_=1e5,
+                    lambda_=lambda_,
                 )
 
                 key, subkey = jax.random.split(key)
@@ -206,7 +207,7 @@ def EWC_train(
             importances=importances,
             saved_params=saved_params,
             task=task,
-            lambda_=1e5,
+            lambda_=lambda_,
         )
         model = eqx.combine(params, static)
         print("eval", "-" * 100)
@@ -214,9 +215,9 @@ def EWC_train(
         results.append(res)
         key, subkey = jax.random.split(key)
         importance = compute_importance(
-            model, state, task, criterion, trainloader, 100, key=subkey
+            model, state, task, criterion, trainloader, 50, key=subkey
         )
         importances = update_importances(importance, importances, task)
-        saved_params[task] = params
+        saved_params[task] = jax.tree.map(lambda x: x, params)
 
     return model, results
