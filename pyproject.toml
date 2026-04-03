@@ -9,6 +9,9 @@ dependencies = [
     "avalanche-lib>=0.6.0",
     "equinox>=0.13.6",
     "ipykernel>=7.2.0",
+    "ipython>=9.11.0",
+    "jax[cuda13]>=0.9.0.1",
     "optax>=0.2.8",
     "pandas>=3.0.1",
+    "polars>=1.39.3",
 ]
