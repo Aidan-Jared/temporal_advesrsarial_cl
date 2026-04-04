@@ -7,7 +7,7 @@ from torchvision.datasets import CIFAR10
 
 from src.cl_methods.ewc import EWC_train
 from src.resnet import ResNet18
-from src.utils import CL_DataLoader
+from src.utils import CL_DataLoader, poinson_images
 
 SEED = 42
 KEY = jax.random.PRNGKey(SEED)
@@ -17,7 +17,7 @@ def main():
     normalize_data = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
+            # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
         ]
     )
     train = CIFAR10(
@@ -38,7 +38,12 @@ def main():
 
     trainloader = CL_DataLoader(train, batch_size=32, splits=5, key=subkey1)
     testloader = CL_DataLoader(test, batch_size=32, splits=5, key=subkey2)
-
+    trainloader.normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+    testloader.normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+    
+    trainloader = poinson_images(
+        trainloader, tasks=1, pcp=0.1, pp=0.1, severity=1, key=subkey3
+    )
     # p_model = ResNet18(3, key=subkey3)
     p_model, state = eqx.nn.make_with_state(ResNet18)(3, key=subkey3)
     # c_model = ResNet18(3, key=subkey3)

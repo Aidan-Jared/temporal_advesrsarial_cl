@@ -1,5 +1,3 @@
-
-from tqdm import tqdm
 from typing import Callable
 
 import equinox as eqx
@@ -8,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from equinox.nn._stateful import State
 from jaxtyping import Array, PRNGKeyArray, PyTree
+from tqdm import tqdm
 
 # from intro import criterion
 from src.utils import CL_DataLoader, _step, eval
@@ -46,7 +45,9 @@ def compute_importance(
         )(model, x, y, state, key)
 
         grads, _ = eqx.partition(grads, eqx.is_array)
-        importance = jax.tree.map(lambda i, g: i + jnp.sum(g**2, axis=0), importance, grads)
+        importance = jax.tree.map(
+            lambda i, g: i + jnp.sum(g**2, axis=0), importance, grads
+        )
 
         return importance
 
@@ -86,7 +87,6 @@ def ECW_penalty(
             saved_param = saved_params[exp]
             imp = importances[exp]
 
-            
             penalty += jnp.sum(
                 jnp.array(
                     jax.tree_util.tree_leaves(
@@ -138,6 +138,7 @@ def EWC_loss(
     acc = jnp.mean(y == pred_y)
     return jnp.squeeze(loss), (acc, state)
 
+
 def EWC_train(
     model: eqx.Module,
     state: eqx.nn.State,
@@ -163,15 +164,15 @@ def EWC_train(
         model = eqx.nn.inference_mode(model, value=False)
 
         params, static = eqx.partition(model, eqx.is_array)
-        print("training task: ", task,"-"*100)
+        print("training task: ", task, "-" * 10)
         for _ in range(task_epochs):
             key, subkey = jax.random.split(key)
             pbar = tqdm(
                 enumerate(trainloader.sample(task, key=subkey)),
                 total=trainloader.iters(task),
-                ncols=100
+                ncols=75,
             )
-            for (step, (x, y)) in pbar:
+            for step, (x, y) in pbar:
                 loss_fn = jax.tree_util.Partial(
                     EWC_loss,
                     criteron=criterion,
@@ -188,8 +189,11 @@ def EWC_train(
 
                 task_loss.append(loss)
                 task_acc.append(acc)
-                
-                if (step + 1) % (trainloader.class_lengths[task] // (trainloader.batch_size * print_every)).item() == 0:
+
+                if (step + 1) % (
+                    trainloader.class_lengths[task]
+                    // (trainloader.batch_size * print_every)
+                ).item() == 0:
                     pbar.set_postfix(
                         {
                             "task_train": task,
@@ -210,7 +214,7 @@ def EWC_train(
             lambda_=lambda_,
         )
         model = eqx.combine(params, static)
-        print("eval", "-" * 100)
+        print("eval", "-" * 10)
         res = eval(model, state, tasks, testloader, loss_fn, key=key)
         results.append(res)
         key, subkey = jax.random.split(key)

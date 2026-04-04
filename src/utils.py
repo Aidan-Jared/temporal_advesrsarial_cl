@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+
 # import optax
 import torch
 
@@ -22,9 +23,10 @@ from avalanche.benchmarks.utils.classification_dataset import ClassificationData
 from avalanche.training.plugins import SupervisedPlugin
 from jaxtyping import Array, PRNGKeyArray
 from torch.utils.data import DataLoader, Dataset, TensorDataset
-
-from src.pacol import PACOL
 from tqdm import tqdm
+
+from src.poisioning.image_coruption import corruption_dict
+from src.poisioning.pacol import PACOL
 
 
 class PoisoningPlugin(SupervisedPlugin):
@@ -181,6 +183,7 @@ class CL_DataLoader:
         splits: int,
         device: str = "cpu",
         iter_device: str = "gpu",
+        replay: bool = False,
         *,
         key: PRNGKeyArray,
     ) -> None:
@@ -188,6 +191,7 @@ class CL_DataLoader:
         self.batch_size = batch_size
         self.seen_tasks = []
         self.iter_device = iter_device
+        self.replay = replay
 
         self.len = getattr(dataset, "__len__", batch_size)
 
@@ -197,7 +201,8 @@ class CL_DataLoader:
             if isinstance(data, jnp.ndarray):
                 all_data.append(np.array(data))
             else:
-                all_data.append(data.numpy())
+                all_data.append(data.numpy() * 255)
+
             label_int = int(label)
             if label_int not in class_to_indices:
                 class_to_indices[label_int] = []
@@ -208,7 +213,7 @@ class CL_DataLoader:
 
         all_data_np = np.stack(all_data)
 
-        self.all_data = jax.device_put(all_data_np, device)
+        self.all_data = jax.device_put(all_data_np, device).astype(jnp.uint8)
 
         self.num_classes = len(class_to_indices)
 
@@ -233,14 +238,27 @@ class CL_DataLoader:
 
         self.tasks = np.arange(self.num_classes).reshape((self.splits, -1))
 
+        if replay:
+            self.buffer = jnp.empty(shape=(0,), dtype=jnp.int32, device=device)
+
     def __len__(self) -> int:
         return self.len
-    
+
+    def normalize(
+        self,
+        mean: tuple | float,
+        std: tuple | float,
+    ):
+        self.mean = jnp.array(mean) #typing:ignore
+        self.std = jnp.array(std) #typing:ignore
+        self.mean = jnp.expand_dims(self.mean, axis=(0,2,3))
+        self.std = jnp.expand_dims(self.std, axis=(0,2,3))
+
     def iters(self, task_n: int) -> int:
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         return n // self.batch_size
-    
+
     def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
 
         task_idx = self.tasks[task_n]
@@ -260,8 +278,11 @@ class CL_DataLoader:
         start_idx = 0
         end_idx = self.batch_size
         for i in range(batches):
-            X = self.all_data[class_idx[start_idx:end_idx]]
+            X = self.all_data[class_idx[start_idx:end_idx]] / 255.0
             y = labels[start_idx:end_idx]
+
+            if hasattr(self, "mean") and hasattr(self, "std"):
+                X = (X - self.mean) / self.std
 
             device = jax.devices(self.iter_device)[0]
             X = jax.device_put(X, device)
@@ -270,6 +291,16 @@ class CL_DataLoader:
             yield (X, y)
             start_idx += self.batch_size
             end_idx += self.batch_size
+
+    def add_to_buffer(
+        self,
+        task_n: int,
+        buffer_size: int,
+        selection_method: Callable[[Array, int, PRNGKeyArray], Array] = None,
+        *,
+        key: PRNGKeyArray | None = None,
+    ):
+        pass
 
 
 def _step(params, static, x, y, state, optim, opt_state, loss_fn, *, key):
@@ -294,14 +325,69 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
         pbar = tqdm(
             enumerate(testloader.sample(p_task, key=subkey)),
             total=testloader.iters(p_task),
-            ncols=100
+            ncols=75,
         )
         for step, (x, y) in pbar:
             loss, (acc, _) = loss_fn(model, x, y, state, key)
             task_loss.append(loss)
             task_acc.append(acc)
             if step % 10 == 0:
-                pbar.set_postfix({"task_eval": p_task, "loss": np.mean(loss).item(), "acc": np.mean(acc).item()})
-        results[p_task] = {"loss": np.mean(task_loss).item(), "acc": np.mean(task_acc).item()}
+                pbar.set_postfix(
+                    {
+                        "task_eval": p_task,
+                        "loss": np.mean(loss).item(),
+                        "acc": np.mean(acc).item(),
+                    }
+                )
+        results[p_task] = {
+            "loss": np.mean(task_loss).item(),
+            "acc": np.mean(task_acc).item(),
+        }
 
     return results
+
+
+def poinson_images(
+    data: CL_DataLoader,
+    tasks: list[int] | int,
+    pcp: float,
+    pp: float,
+    severity: int = 1,
+    corruption: list[str] = list(corruption_dict.keys()),
+    *,
+    key: PRNGKeyArray,
+) -> CL_DataLoader:
+    """
+    tasks: which tasks to poison
+    pcp: proportion of classes to poison
+    pp: proportion of samples to poison
+    severity: severity of corruption
+    corruption: list of corruption types
+    """
+    key, subkey = jax.random.split(key)
+    task_idx = data.tasks[tasks]
+    n_poisoned_class = int(np.ceil(task_idx.shape[0] * pcp))
+    
+    class_idx = data.class_indicies[task_idx[:n_poisoned_class]].reshape(-1)
+    n = np.sum(data.class_lengths[task_idx])
+    poisoned_idx = jax.random.choice(
+        subkey, class_idx, shape=(int(n * pp),), replace=False
+    )
+    poisoned_idx = jnp.array_split(
+        poisoned_idx,
+        jnp.ceil(poisoned_idx.shape[0] / len(corruption)).astype(jnp.int32),
+    )
+    for idx, poision in enumerate(corruption):
+        attack = corruption_dict[poision]
+        key, *keys = jax.random.split(key, poisoned_idx[idx].shape[0] + 1)
+        keys = jnp.stack(keys)
+
+        def _apply(data, severity, key):
+            return attack(data, severity, key=key)
+
+        data.all_data = data.all_data.at[poisoned_idx[idx]].set(
+            jax.vmap(_apply, in_axes=(0, None, 0))(
+                data.all_data[poisoned_idx[idx]], severity, keys
+            )
+        )
+    return data
