@@ -184,7 +184,7 @@ def EWC_train(
 
                 key, subkey = jax.random.split(key)
                 params, loss, acc, state, opt_state = eqx.filter_jit(
-                    _step,  # static_argnames=["params", "static", "loss_fn"]
+                    _step
                 )(params, static, x, y, state, optim, opt_state, loss_fn, key=subkey)
 
                 task_loss.append(loss)
@@ -223,5 +223,6 @@ def EWC_train(
         )
         importances = update_importances(importance, importances, task)
         saved_params[task] = jax.tree.map(lambda x: x, params)
+        jax.clear_caches()
 
     return model, results

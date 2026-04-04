@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import equinox as eqx
@@ -174,7 +175,6 @@ class PoisoningPlugin(SupervisedPlugin):
                 )
         return strategy
 
-
 class CL_DataLoader:
     def __init__(
         self,
@@ -184,6 +184,9 @@ class CL_DataLoader:
         device: str = "cpu",
         iter_device: str = "gpu",
         replay: bool = False,
+        buffer_size: int = 3,
+        workers: int = 1,
+        dtype=jnp.float32,
         *,
         key: PRNGKeyArray,
     ) -> None:
@@ -192,6 +195,9 @@ class CL_DataLoader:
         self.seen_tasks = []
         self.iter_device = iter_device
         self.replay = replay
+        self.buffer_size = buffer_size
+        self.workers = workers
+        self.dtype = dtype
 
         self.len = getattr(dataset, "__len__", batch_size)
 
@@ -241,6 +247,11 @@ class CL_DataLoader:
         if replay:
             self.buffer = jnp.empty(shape=(0,), dtype=jnp.int32, device=device)
 
+    @staticmethod
+    @jax.jit
+    def _norm(X, mean, std):
+        return (X - mean) / std
+    
     def __len__(self) -> int:
         return self.len
 
@@ -249,24 +260,30 @@ class CL_DataLoader:
         mean: tuple | float,
         std: tuple | float,
     ):
-        self.mean = jnp.array(mean) #typing:ignore
-        self.std = jnp.array(std) #typing:ignore
-        self.mean = jnp.expand_dims(self.mean, axis=(0,2,3))
-        self.std = jnp.expand_dims(self.std, axis=(0,2,3))
+        self.mean = jnp.array(mean)  # typing:ignore
+        self.std = jnp.array(std)  # typing:ignore
+        self.mean = jnp.expand_dims(self.mean, axis=(0, 2, 3))
+        self.std = jnp.expand_dims(self.std, axis=(0, 2, 3))
 
     def iters(self, task_n: int) -> int:
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         return n // self.batch_size
 
+    def _prepare_batch(self, X, y, device):
+        X = jax.jit(lambda x: x / 255.0)(X)
+        if hasattr(self, "mean") and hasattr(self, "std"):
+            X = self._norm(X, self.mean, self.std)
+        X = jax.device_put(X, device)
+        y = jax.device_put(y, device)
+        return X.astype(self.dtype), y.astype(jnp.int32)
+
     def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
 
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         class_idx = self.class_indicies[task_idx].reshape(-1)
-        labels = np.stack(
-            [jnp.full(self.class_lengths[i], fill_value=i) for i in task_idx]
-        ).reshape(-1)
+        labels = np.repeat(task_idx, self.class_lengths[task_idx])
 
         if key is not None:
             shuffle = jax.random.permutation(key=key, x=n)
@@ -274,23 +291,32 @@ class CL_DataLoader:
             labels = labels[shuffle]
 
         batches = n // self.batch_size
+        class_idx = class_idx[: batches * self.batch_size].reshape(
+            batches, self.batch_size
+        )
+        labels = labels[: batches * self.batch_size].reshape(batches, self.batch_size)
 
-        start_idx = 0
-        end_idx = self.batch_size
-        for i in range(batches):
-            X = self.all_data[class_idx[start_idx:end_idx]] / 255.0
-            y = labels[start_idx:end_idx]
+        device = jax.devices(self.iter_device)[0]
 
-            if hasattr(self, "mean") and hasattr(self, "std"):
-                X = (X - self.mean) / self.std
+        def raw_generator():
+            for i in range(batches):
+                X = self.all_data[class_idx[i]]
+                y = labels[i]
+                yield (X, y)
 
-            device = jax.devices(self.iter_device)[0]
-            X = jax.device_put(X, device)
-            y = jax.device_put(y, device)
+        yield from self._prefetch(raw_generator(), device, self.buffer_size)
 
-            yield (X, y)
-            start_idx += self.batch_size
-            end_idx += self.batch_size
+    def _prefetch(self, generator, device, buffer_size: int):
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = []
+            for item in generator:
+                futures.append(
+                    executor.submit(self._prepare_batch, item[0], item[1], device)
+                )
+                if len(futures) >= buffer_size:
+                    yield futures.pop(0).result()
+            while futures:
+                yield futures.pop(0).result()
 
     def add_to_buffer(
         self,
@@ -367,7 +393,7 @@ def poinson_images(
     key, subkey = jax.random.split(key)
     task_idx = data.tasks[tasks]
     n_poisoned_class = int(np.ceil(task_idx.shape[0] * pcp))
-    
+
     class_idx = data.class_indicies[task_idx[:n_poisoned_class]].reshape(-1)
     n = np.sum(data.class_lengths[task_idx])
     poisoned_idx = jax.random.choice(
