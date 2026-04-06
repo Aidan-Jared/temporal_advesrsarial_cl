@@ -12,37 +12,42 @@ from tqdm import tqdm
 from src.utils import CL_DataLoader, eval, model_forward
 
 
+def loss_fn(model, x, y, state, criterion, key):
+    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, 0))(
+        model, x, state, key
+    )
+    loss = criterion(logits, y)
+    loss = jnp.mean(loss)
+    pred_y = jnp.argmax(logits, axis=1)
+    acc = jnp.mean(y == pred_y)
+    return loss, (acc, state)
+
+eqx.filter_jit()
 def get_gradients(
     model: eqx.Module,
     state: State,
     criterion: Callable,
-    task: int,
     memory: dict[int, tuple[Array, Array]],
     *,
     key: PRNGKeyArray,
 ) -> PyTree:
-    if task == 0:
-        return {}
     params, _ = eqx.partition(model, eqx.is_array)
-    G = jax.tree.map(lambda p: [], params)
+    grad_list = []
     del params
 
     def step(model, x, y, state, key):
-        y_pred, _ = jax.vmap(
-            model_forward, in_axes=(None, 0, None, 0), out_axes=(0, None)
-        )(model, x, state, key)
-        loss = criterion(y_pred, y)
+        loss, _ = loss_fn(model, x, y, state, criterion, key)
         return loss
 
     step = eqx.filter_grad(eqx.filter_jit(step))
     key, subkey = jax.random.split(key)
-    for t in range(task):
+    for t in memory.keys():
         x, y = memory[t]
-        key, subkey = jax.random.split(key)
-        grads = step(model, x, y, state, subkey)
-        G = jax.tree.map(lambda g, p: g.append(p), G, grads)
-
-    return jax.tree.map(lambda g: jnp.stack(g), G)
+        key, *keys = jax.random.split(key, x.shape[0] + 1)
+        keys = jnp.stack(keys)
+        grads = step(model, x, y, state, keys)
+        grad_list.append(grads)
+    return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
 
 
 def update_memory(
@@ -81,11 +86,17 @@ def update_memory(
     return memory
 
 
-def solve_qp(M: PyTree, grads: PyTree, memory_strenght: float) -> PyTree:
+def solve_qp(M: PyTree, grads: PyTree, memory_strength: float) -> PyTree:
     def solve_qp_single(m, g):
+        shape = g.shape
+        n = g.size
         t = m.shape[0]
+
+        m = m.reshape(t, n)
+        g = g.reshape(n)
+
         G = jnp.eye(t)
-        h = jnp.full(t, memory_strenght)
+        h = jnp.full(t, memory_strength)
         P = jnp.dot(m, m.T)
         P = 0.5 * (P + P.T) + 1e-3 * G
         q = jnp.dot(m, g)
@@ -93,7 +104,7 @@ def solve_qp(M: PyTree, grads: PyTree, memory_strenght: float) -> PyTree:
             Q=P, q=-q, h=h, G=-G.T, A=jnp.zeros((0, t)), b=jnp.zeros(0)
         )
         v_star = jnp.dot(v, m) + g
-        return v_star.astype(jnp.float32)
+        return v_star.reshape(shape).astype(jnp.float32)
 
     return jax.tree.map(solve_qp_single, M, grads)
 
@@ -101,46 +112,39 @@ def solve_qp(M: PyTree, grads: PyTree, memory_strenght: float) -> PyTree:
 def GEM(
     M: PyTree,
     grads: PyTree,
-    memory_strenght: float,
+    memory_strength: float,
     task: int,
 ) -> PyTree:
-    return jax.lax.cond(
-        task > 0,
-        lambda m, g: solve_qp(m, g, memory_strenght),
-        lambda m, g: g,
-        M,
-        grads,
-    )
+    if task > 0:
+        return solve_qp(M, grads, memory_strength)
+    else:
+        return grads
 
 
 def AGEM(
     M: PyTree,
     grads: PyTree,
-    memory_strenght: float,
+    memory_strength: float,
     task: int,
 ) -> PyTree:
-    def _agem(m, g):
-        def _single(m, g):
-            dotg = jnp.dot(g, m)
-            alpha = dotg / jnp.dot(m, m)
-            proj = g - m * alpha
-            return proj
-
-        return jax.tree.map(_single, m, g)
-
-    return jax.lax.cond(
-        task > 0,
-        lambda m, g: _agem(m, g),
-        lambda m, g: g,
-        M,
-        grads,
-    )
-
-
-method = {
-    "AGEM": AGEM,
-    "GEM": GEM,
-}
+   if task == 0:
+        return grads
+   else:
+        g_leaves = jax.tree.leaves(grads)
+        m_leaves = jax.tree.leaves(M)
+        g_flat = jnp.concatenate([g.reshape(-1) for g in g_leaves])
+        m_flat = jnp.concatenate([m.reshape(m.shape[0], -1) for m in m_leaves], axis=1)
+        
+        m_flat = jnp.mean(m_flat, axis=0)
+        dotg = jnp.dot(g_flat, m_flat)
+        alpha = dotg / jnp.dot(m_flat, m_flat)
+        
+        g_prog = jnp.where(dotg < 0, g_flat - alpha * m_flat, g_flat)
+        
+        sizes = [g.size for g in g_leaves]
+        splits = np.cumsum(sizes[:-1]).tolist()
+        g_prog = jnp.split(g_prog, splits)
+        return jax.tree_util.tree_unflatten(jax.tree.structure(grads), [g_prog[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))])
 
 
 @eqx.filter_jit
@@ -154,30 +158,28 @@ def train_step(
     optim,
     opt_state,
     task,
-    memory_strenght,
+    memory_strength,
     method_name,
+    *,
     key,
-):
-    def loss_fn(model, state):
-        logits, state = jax.vmap(model_forward, in_axes=(None, 0, 0, None, None))(
-            model, x, state, key
-        )
-        loss = criterion(logits, y)
-        loss = jnp.mean(loss)
-        pred_y = jnp.argmax(logits, axis=1)
-        acc = jnp.mean(y == pred_y)
-        return loss, (acc, state)
+): 
 
     (loss, (acc, state)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
-        model, state
+        model, x, y, state, criterion, key
     )
-    grads = method[method_name](G, grads, memory_strenght, task)
-    model, opt_state = optim.update(grads, opt_state, model)
-
-    updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    grads = method[method_name](G, grads, memory_strength, task)
+    
+    updates, opt_state = optim.update(
+        grads, opt_state, eqx.filter(model, eqx.is_array)
+    )
     model = eqx.apply_updates(model, updates)
+
     return model, state, opt_state, loss, acc
 
+method = {
+    "AGEM": AGEM,
+    "GEM": GEM,
+}
 
 def GEM_train(
     model: eqx.Module,
@@ -189,19 +191,20 @@ def GEM_train(
     task_epochs: int,
     tasks: int,
     print_every: int,
-    method_name: str,
-    memory_strenght: float,
-    task_samples: int,
+    method_name: str = "GEM",
+    memory_strength: float | None = 1.,
+    task_samples: int = 10,
     *,
     key: PRNGKeyArray,
 ):
     results = []
     memory: dict[int, tuple[jnp.ndarray, jnp.ndarray]] = dict()
-    G = jax.tree.map(lambda p: jnp.zeros_like(p), eqx.partition(model, eqx.is_array)[0])
+    G = jax.tree.map(lambda p: jnp.zeros_like(p), eqx.filter(model, eqx.is_array))
     for task in range(tasks):
         task_loss = []
         task_acc = []
         opt_state = optim.init(eqx.filter(model, eqx.is_array))
+        model = eqx.nn.inference_mode(model, value=False)
         for epoch in range(task_epochs):
             key, subkey = jax.random.split(key)
             print("training task: ", task, "-" * 10)
@@ -223,11 +226,11 @@ def GEM_train(
                     optim,
                     opt_state,
                     task,
-                    memory_strenght,
+                    memory_strength,
                     method_name,
                     keys,
                 )
-
+            
                 task_loss.append(loss)
                 task_acc.append(acc)
 
@@ -246,14 +249,21 @@ def GEM_train(
                     task_loss = []
                     task_acc = []
 
-            key, subkey1, subkey2 = jax.random.split(key, 3)
-            memory = update_memory(trainloader, task, memory, task_samples, key=subkey1)
-            G = get_gradients(model, state, criterion, task, memory, key=subkey2)
-            print("eval", "-" * 10)
-            res = eqx.filter_jit(eval)(
-                model, state, tasks, testloader, criterion, key=key
-            )
-            results.append(res)
-            jax.clear_caches()
+        key, subkey1, subkey2 = jax.random.split(key, 3)
+        
+        memory = update_memory(trainloader, task, memory, task_samples, key=subkey1)
+        
+        G = get_gradients(model, state, criterion, memory, key=subkey2)
+        
+        print("eval", "-" * 10)
+        
+        loss_func = jax.tree_util.Partial(loss_fn, criterion = criterion)
+        key, subkey = jax.random.split(key)
+        
+        res = eval(
+        model, state, tasks, testloader, loss_func, key=subkey
+        )
+        results.append(res)
+        jax.clear_caches()
 
     return model, results

@@ -26,7 +26,7 @@ from src.poisioning.pacol import PACOL
 # from avalanche.benchmarks.utils import AvalancheDataset, DataAttribute, FlatData
 # from avalanche.benchmarks.utils.classification_dataset import ClassificationDataset
 # from avalanche.training.plugins import SupervisedPlugin
-# from jaxtyping import Array, PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 from torch.utils.data import Dataset
 
 class CL_DataLoader:
@@ -209,7 +209,9 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
             ncols=75,
         )
         for step, (x, y) in pbar:
-            loss, (acc, _) = loss_fn(model, x, y, state, key)
+            key, *keys = jax.random.split(key, x.shape[0]+1)
+            keys = jnp.stack(keys)
+            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, key = keys)
             task_loss.append(loss)
             task_acc.append(acc)
             if step % 10 == 0:
