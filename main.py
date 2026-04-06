@@ -12,7 +12,8 @@ from src.utils import CL_DataLoader, poinson_images
 
 SEED = 42
 KEY = jax.random.PRNGKey(SEED)
-
+# for hyperparameters
+# https://github.com/ContinualAI/continual-learning-baselines/tree/main/experiments
 
 def main():
     normalize_data = transforms.Compose(
@@ -38,7 +39,7 @@ def main():
     dtype = jax.numpy.float32
     subkey1, subkey2, subkey3 = jax.random.split(KEY, 3)
 
-    trainloader = CL_DataLoader(train, batch_size=32, splits=5, dtype=dtype, key=subkey1)
+    trainloader = CL_DataLoader(train, batch_size=32, splits=5, dtype=dtype, key=subkey1, replay=True)
     testloader = CL_DataLoader(test, batch_size=32, splits=5, dtype=dtype, key=subkey2)
     trainloader.normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
     testloader.normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))

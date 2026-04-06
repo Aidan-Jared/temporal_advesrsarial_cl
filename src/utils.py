@@ -7,25 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 from tqdm import tqdm
 
+from src.cl_methods import replay
+
 from src.poisioning.image_coruption import corruption_dict
 from src.poisioning.pacol import PACOL
-
-# import optax
-# import torch
-
-# from art.attacks.attack import PoisoningAttack
-# from art.attacks.poisoning import (
-#     adversarial_embedding_attack,
-#     backdoor_attack,
-#     backdoor_attack_dgm,
-#     bad_det,
-#     clean_label_backdoor_attack,
-#     gradient_matching_attack,
-#     perturbations,
-# )
-# from avalanche.benchmarks.utils import AvalancheDataset, DataAttribute, FlatData
-# from avalanche.benchmarks.utils.classification_dataset import ClassificationDataset
-# from avalanche.training.plugins import SupervisedPlugin
 from jaxtyping import Array, PRNGKeyArray
 from torch.utils.data import Dataset
 
@@ -38,6 +23,7 @@ class CL_DataLoader:
         device: str = "cpu",
         iter_device: str = "gpu",
         replay: bool = False,
+        replay_buffer_size: int = 100,
         buffer_size: int = 3,
         workers: int = 1,
         dtype=jnp.float32,
@@ -52,6 +38,7 @@ class CL_DataLoader:
         self.buffer_size = buffer_size
         self.workers = workers
         self.dtype = dtype
+        self.replay_buffer_size = replay_buffer_size
 
         self.len = getattr(dataset, "__len__", batch_size)
 
@@ -99,7 +86,10 @@ class CL_DataLoader:
         self.tasks = np.arange(self.num_classes).reshape((self.splits, -1))
 
         if replay:
-            self.buffer = jnp.empty(shape=(0,), dtype=jnp.int32, device=device)
+            self.buffer = jnp.zeros(shape=(self.replay_buffer_size, *self.all_data.shape[1:]), dtype=jnp.int32, device=device)
+            self.buffer_labels = jnp.zeros(shape=(self.replay_buffer_size,), dtype=jnp.int32, device=device)
+            self.buffer_start = 0
+            self.buffer_end = self.buffer_size // self.splits
 
     @staticmethod
     @jax.jit
@@ -124,7 +114,11 @@ class CL_DataLoader:
         n = jnp.sum(self.class_lengths[task_idx]).item()
         return n // self.batch_size
 
-    def _prepare_batch(self, X, y, device):
+    def _prepare_batch(self, X, y, device, *, key):
+        if self.replay and key is not None:
+            idx = jax.random.permutation(key, jnp.sum(jnp.where(self.buffer_labels != 0, 1, 0)))
+            X = jnp.concatenate([X, self.buffer[idx]])
+            y = jnp.concatenate([y, self.buffer_labels[idx]])
         X = jax.jit(lambda x: x / 255.0)(X)
         if hasattr(self, "mean") and hasattr(self, "std"):
             X = self._norm(X, self.mean, self.std)
@@ -158,14 +152,18 @@ class CL_DataLoader:
                 y = labels[i]
                 yield (X, y)
 
-        yield from self._prefetch(raw_generator(), device, self.buffer_size)
+        yield from self._prefetch(raw_generator(), device, self.buffer_size, key=key)
 
-    def _prefetch(self, generator, device, buffer_size: int):
+    def _prefetch(self, generator, device, buffer_size: int, *, key):
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
             futures = []
             for item in generator:
+                if key is not None:
+                    key, subkey = jax.random.split(key)
+                else:
+                    subkey = None
                 futures.append(
-                    executor.submit(self._prepare_batch, item[0], item[1], device)
+                    executor.submit(self._prepare_batch, item[0], item[1], device, key=subkey)
                 )
                 if len(futures) >= buffer_size:
                     yield futures.pop(0).result()
@@ -176,11 +174,27 @@ class CL_DataLoader:
         self,
         task_n: int,
         buffer_size: int,
-        selection_method: Callable[[Array, int, PRNGKeyArray], Array] = None,
+        selection_method: Callable | None = None,
         *,
-        key: PRNGKeyArray | None = None,
+        key: PRNGKeyArray,
     ):
-        pass
+        if not hasattr(self, 'buffer'):
+            return
+        if selection_method is None:
+            selection_method = replay.random_selection
+        sampled_data, sampled_labels = selection_method(self, task_n, buffer_size, key=key)
+        sampled_data = jax.device_put(sampled_data, device = self.buffer.device)
+        sampled_labels = jax.device_put(sampled_labels, device = self.buffer_labels.device)
+        
+        if self.buffer_start + sampled_data.shape[0] > self.replay_buffer_size:
+            diff = self.replay_buffer_size - self.buffer_start
+            sampled_data = sampled_data[:diff]
+            sampled_labels = sampled_labels[:diff]
+        self.buffer = self.buffer.at[self.buffer_start:self.buffer_end].set(sampled_data)
+        self.buffer_labels = self.buffer_labels.at[self.buffer_start:self.buffer_end].set(sampled_labels)
+        self.buffer_start = int(self.buffer_start + buffer_size)
+        self.buffer_end = int(self.buffer_end + buffer_size)
+        
 
 
 def _step(params, static, x, y, state, optim, opt_state, loss_fn, *, key):
@@ -209,9 +223,8 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
             ncols=75,
         )
         for step, (x, y) in pbar:
-            key, *keys = jax.random.split(key, x.shape[0]+1)
-            keys = jnp.stack(keys)
-            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, key = keys)
+            key, subkey = jax.random.split(key)
+            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, key = subkey)
             task_loss.append(loss)
             task_acc.append(acc)
             if step % 10 == 0:

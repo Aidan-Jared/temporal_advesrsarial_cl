@@ -13,6 +13,8 @@ from src.utils import CL_DataLoader, eval, model_forward
 
 
 def loss_fn(model, x, y, state, criterion, key):
+    key, *keys = jax.random.split(key, x.shape[0]+1)
+    keys = jnp.stack(keys)
     logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, 0))(
         model, x, state, key
     )
@@ -43,9 +45,8 @@ def get_gradients(
     key, subkey = jax.random.split(key)
     for t in memory.keys():
         x, y = memory[t]
-        key, *keys = jax.random.split(key, x.shape[0] + 1)
-        keys = jnp.stack(keys)
-        grads = step(model, x, y, state, keys)
+        key, subkey = jax.random.split(key)
+        grads = step(model, x, y, state, subkey)
         grad_list.append(grads)
     return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
 
@@ -214,8 +215,8 @@ def GEM_train(
                 ncols=75,
             )
             for step, (X, y) in pbar:
-                key, *keys = jax.random.split(key, X.shape[0] + 1)
-                keys = jnp.stack(keys)
+                key, subkey = jax.random.split(key)
+                
                 model, state, opt_state, loss, acc = train_step(
                     model,
                     X,
@@ -228,7 +229,7 @@ def GEM_train(
                     task,
                     memory_strength,
                     method_name,
-                    keys,
+                    key = subkey,
                 )
             
                 task_loss.append(loss)
