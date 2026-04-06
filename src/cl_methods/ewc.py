@@ -9,14 +9,13 @@ from jaxtyping import Array, PRNGKeyArray, PyTree
 from tqdm import tqdm
 
 # from intro import criterion
-from src.utils import CL_DataLoader, _step, eval
+from src.utils import CL_DataLoader, _step, eval, model_forward
 
 
 def compute_importance(
     model: eqx.Module,
     state: State,
     task_n: int,
-    criteron: Callable,
     data: CL_DataLoader,
     batches: int,
     *,
@@ -28,12 +27,10 @@ def compute_importance(
     key, subkey = jax.random.split(key)
 
     def step_fn(model, x, y, state, key, importance):
-        def forward(model, x, state, key):
-            logits, _ = model(x, state=state, key=key)
-            return logits
-
+        
         def loss_fn(model, x, y, state, key):
-            logits = forward(model, x, state, key)
+            
+            logits, _ = jax.vmap(model_forward, in_axes=(None, 0, None, 0), out_axes=(0, None))(model, x, state, key)
             loss = jax.nn.log_softmax(logits)
 
             return -loss[y]
@@ -119,14 +116,8 @@ def EWC_loss(
 
     key, *keys = jax.random.split(key, x.shape[0] + 1)
     keys = jnp.vstack(keys)
-
-    def forward(x, state, key):
-        logits, state = model(x, state=state, key=key)  # type: ignore
-        return logits, state
-
-    logits, state = jax.vmap(
-        forward, axis_name="batch", in_axes=(0, None, 0), out_axes=(0, None)
-    )(x, state, keys)
+    
+    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, 0), out_axes=(0, None))(model, x, state, keys)
 
     loss = criteron(logits, y)
     params, _ = eqx.partition(model, eqx.is_array)
@@ -219,7 +210,7 @@ def EWC_train(
         results.append(res)
         key, subkey = jax.random.split(key)
         importance = compute_importance(
-            model, state, task, criterion, trainloader, 50, key=subkey
+            model, state, task, trainloader, 50, key=subkey
         )
         importances = update_importances(importance, importances, task)
         saved_params[task] = jax.tree.map(lambda x: x, params)
