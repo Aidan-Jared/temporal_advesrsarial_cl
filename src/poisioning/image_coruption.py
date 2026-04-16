@@ -312,11 +312,6 @@ corruption_dict = {
     "clean": clean,
 }
 
-
-def corrupt_image(image: Array, *, key: PRNGKeyArray | None = None) -> Array:
-    return image
-
-
 # def elastic_transform(image, severity=1):
 #     IMSIZE = image.size[0]  # handles 32 or 64 automatically
 #     c = [

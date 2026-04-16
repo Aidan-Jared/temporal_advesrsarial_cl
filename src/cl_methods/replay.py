@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-import numpy as np
+# import numpy as np
 from jaxtyping import Array, PRNGKeyArray
 from src.utils import CL_DataLoader
 

@@ -30,7 +30,7 @@ def compute_importance(
         
         def loss_fn(model, x, y, state, key):
             
-            logits, _ = jax.vmap(model_forward, in_axes=(None, 0, None, 0), out_axes=(0, None))(model, x, state, key)
+            logits, _ = model_forward(model, x, state, key)
             loss = jax.nn.log_softmax(logits)
 
             return -loss[y]

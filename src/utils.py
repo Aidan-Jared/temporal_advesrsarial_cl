@@ -7,10 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 from tqdm import tqdm
 
-from src.cl_methods import replay
+# from src.cl_methods import replay
 
 from src.poisioning.image_coruption import corruption_dict
-from src.poisioning.pacol import PACOL
+# from src.poisioning.pacol import PACOL
 from jaxtyping import Array, PRNGKeyArray
 from torch.utils.data import Dataset
 
@@ -33,6 +33,7 @@ class CL_DataLoader:
         self.splits = splits
         self.batch_size = batch_size
         self.seen_tasks = []
+        self.device = device
         self.iter_device = iter_device
         self.replay = replay
         self.buffer_size = buffer_size
@@ -85,11 +86,11 @@ class CL_DataLoader:
 
         self.tasks = np.arange(self.num_classes).reshape((self.splits, -1))
 
-        if replay:
-            self.buffer = jnp.zeros(shape=(self.replay_buffer_size, *self.all_data.shape[1:]), dtype=jnp.int32, device=device)
-            self.buffer_labels = jnp.zeros(shape=(self.replay_buffer_size,), dtype=jnp.int32, device=device)
-            self.buffer_start = 0
-            self.buffer_end = self.buffer_size // self.splits
+        # if replay:
+        #     self.buffer = jnp.zeros(shape=(self.replay_buffer_size, *self.all_data.shape[1:]), dtype=jnp.int32, device=device)
+        #     self.buffer_labels = jnp.zeros(shape=(self.replay_buffer_size,), dtype=jnp.int32, device=device)
+        #     self.buffer_start = 0
+        #     self.buffer_end = self.buffer_size // self.splits
 
     @staticmethod
     @jax.jit
@@ -115,10 +116,10 @@ class CL_DataLoader:
         return n // self.batch_size
 
     def _prepare_batch(self, X, y, device, *, key):
-        if self.replay and key is not None:
-            idx = jax.random.permutation(key, jnp.sum(jnp.where(self.buffer_labels != 0, 1, 0)))
-            X = jnp.concatenate([X, self.buffer[idx]])
-            y = jnp.concatenate([y, self.buffer_labels[idx]])
+        # if self.replay and key is not None:
+        #     idx = jax.random.permutation(key, jnp.sum(jnp.where(self.buffer_labels != 0, 1, 0)))
+        #     X = jnp.concatenate([X, self.buffer[idx]])
+        #     y = jnp.concatenate([y, self.buffer_labels[idx]])
         X = jax.jit(lambda x: x / 255.0)(X)
         if hasattr(self, "mean") and hasattr(self, "std"):
             X = self._norm(X, self.mean, self.std)
@@ -126,13 +127,13 @@ class CL_DataLoader:
         y = jax.device_put(y, device)
         return X.astype(self.dtype), y.astype(jnp.int32)
 
-    def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
+    def sample(self, task_n: int, poision: bool = False, *, key: PRNGKeyArray | None = None):
 
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         class_idx = self.class_indicies[task_idx].reshape(-1)
         labels = np.repeat(task_idx, self.class_lengths[task_idx])
-
+            
         if key is not None:
             shuffle = jax.random.permutation(key=key, x=n)
             class_idx = class_idx[shuffle]
@@ -170,32 +171,30 @@ class CL_DataLoader:
             while futures:
                 yield futures.pop(0).result()
 
-    def add_to_buffer(
-        self,
-        task_n: int,
-        buffer_size: int,
-        selection_method: Callable | None = None,
-        *,
-        key: PRNGKeyArray,
-    ):
-        if not hasattr(self, 'buffer'):
-            return
-        if selection_method is None:
-            selection_method = replay.random_selection
-        sampled_data, sampled_labels = selection_method(self, task_n, buffer_size, key=key)
-        sampled_data = jax.device_put(sampled_data, device = self.buffer.device)
-        sampled_labels = jax.device_put(sampled_labels, device = self.buffer_labels.device)
+    # def add_to_buffer(
+    #     self,
+    #     task_n: int,
+    #     buffer_size: int,
+    #     selection_method: Callable | None = None,
+    #     *,
+    #     key: PRNGKeyArray,
+    # ):
+    #     if not hasattr(self, 'buffer'):
+    #         return
+    #     if selection_method is None:
+    #         selection_method = replay.random_selection
+    #     sampled_data, sampled_labels = selection_method(self, task_n, buffer_size, key=key)
+    #     sampled_data = jax.device_put(sampled_data, device = self.buffer.device)
+    #     sampled_labels = jax.device_put(sampled_labels, device = self.buffer_labels.device)
         
-        if self.buffer_start + sampled_data.shape[0] > self.replay_buffer_size:
-            diff = self.replay_buffer_size - self.buffer_start
-            sampled_data = sampled_data[:diff]
-            sampled_labels = sampled_labels[:diff]
-        self.buffer = self.buffer.at[self.buffer_start:self.buffer_end].set(sampled_data)
-        self.buffer_labels = self.buffer_labels.at[self.buffer_start:self.buffer_end].set(sampled_labels)
-        self.buffer_start = int(self.buffer_start + buffer_size)
-        self.buffer_end = int(self.buffer_end + buffer_size)
-        
-
+    #     if self.buffer_start + sampled_data.shape[0] > self.replay_buffer_size:
+    #         diff = self.replay_buffer_size - self.buffer_start
+    #         sampled_data = sampled_data[:diff]
+    #         sampled_labels = sampled_labels[:diff]
+    #     self.buffer = self.buffer.at[self.buffer_start:self.buffer_end].set(sampled_data)
+    #     self.buffer_labels = self.buffer_labels.at[self.buffer_start:self.buffer_end].set(sampled_labels)
+    #     self.buffer_start = int(self.buffer_start + buffer_size)
+    #     self.buffer_end = int(self.buffer_end + buffer_size)
 
 def _step(params, static, x, y, state, optim, opt_state, loss_fn, *, key):
     
@@ -287,7 +286,7 @@ def poinson_images(
             )
         )
     return data
-
+    
 def model_forward(model, x, state, key):
     return model(x, state, key=key)
 
