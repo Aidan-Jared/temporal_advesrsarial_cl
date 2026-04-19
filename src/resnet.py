@@ -7,7 +7,7 @@ from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
-SEED = 43
+SEED = 42
 KEY = jax.random.PRNGKey(SEED)
 
 
@@ -36,9 +36,9 @@ class Drop_Path(eqx.Module):
             output = (x * mask) / key_prob
 
             return output
-
+                        
         return jax.lax.cond(
-            self.p > 0.0 and not self.inference and key is None,
+            self.p > 0.0 and not self.inference and key is not None,
             _drop,
             lambda x, k: x,
             x,
@@ -147,7 +147,7 @@ class ResNet18(eqx.Module):
     layer3: eqx.nn.Sequential
     layer4: eqx.nn.Sequential
 
-    fc: eqx.nn.Linear
+    # fc: eqx.nn.Linear
 
     hidden_channels: int
 
@@ -191,7 +191,7 @@ class ResNet18(eqx.Module):
         )
 
         self.avgpool = eqx.nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = eqx.nn.Linear(hidden_channels * 8, num_classes, key=subkey6)
+        # self.fc = eqx.nn.Linear(hidden_channels * 8, num_classes, key=subkey6)
 
     def _make_layer(
         self, out_channels: int, num_blocks: int, stride: int, dtype, key: PRNGKeyArray
@@ -236,6 +236,144 @@ class ResNet18(eqx.Module):
             out.shape[0]
         )
 
-        out = self.fc(out)
+        # out = self.fc(out)
 
         return out, state
+
+
+class singleHeadResNet(eqx.Module):
+    resnet: ResNet18
+    fc: eqx.nn.Linear
+    
+    def __init__(
+        self,
+        input_channels: int,
+        hidden_channels: int = 64,
+        num_classes: int = 10,
+        num_splits: int = 0, #not used but here for compatibility
+        dtype=jnp.float32,
+        *,
+        key: PRNGKeyArray,
+    ):
+        subkey1, subkey2 = jax.random.split(key)
+        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
+        self.fc = eqx.nn.Linear(hidden_channels * 8, num_classes, dtype=dtype, key=subkey2)
+        
+    def __call__(
+        self,
+        x: Float[Array, "batch c w h"],
+        state: PyTree,
+        task: int, # not used but here for compatibility
+        *,
+        key: PRNGKeyArray,
+    ):
+        out, state = self.resnet(x, state, key=key)
+        out = self.fc(out)
+        return out, state
+
+class multiHeadResNet(eqx.Module):
+    resnet: ResNet18
+    heads: list[eqx.nn.Linear]
+    datatype: jnp.dtype = eqx.field(static=True)
+    
+    def __init__(
+        self,
+        input_channels: int,
+        hidden_channels: int = 64,
+        num_classes: int = 10,
+        num_splits: int = 5, 
+        dtype=jnp.float32,
+        *,
+        key: PRNGKeyArray,
+    ):
+        self.datatype = dtype
+        subkey1, subkey2 = jax.random.split(key)
+        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
+        self.heads = [eqx.nn.Linear(hidden_channels * 8, num_classes // num_splits, dtype=dtype, key = subkey2)]
+    
+    def __call__(
+        self,
+        x: Float[Array, "batch c w h"],
+        state: PyTree,
+        task: int,
+        *,
+        key: PRNGKeyArray,
+    ):
+        out, state = self.resnet(x, state, key=key)
+        out = self.heads[task](out)
+        return out, state
+    
+    def add_head(self, num_classes: int, *, key: PRNGKeyArray) -> None:
+        subkey = jax.random.fold_in(key, len(self.heads))
+        new_head = eqx.nn.Linear(self.heads[0].in_features, num_classes, dtype=self.datatype, key=subkey)
+        
+        new_head = kaiming_init_model(new_head, subkey)
+        
+        self.heads.append(new_head)
+        
+
+class expandingHeadResNet(eqx.Module):
+    resnet: ResNet18
+    heads: list[eqx.nn.Linear]
+    
+    def __init__(
+        self,
+        input_channels: int,
+        hidden_channels: int = 64,
+        num_classes: int = 10,
+        num_splits: int = 5, 
+        dtype=jnp.float32,
+        *,
+        key: PRNGKeyArray,
+    ):
+        subkey1, subkey2 = jax.random.split(key)
+        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
+        self.head = eqx.nn.Linear(hidden_channels * 8, num_classes // num_splits, dtype=dtype, key=subkey2)
+    
+    def __call__(
+        self,
+        x: Float[Array, "batch c w h"],
+        state: PyTree,
+        task: int,
+        *,
+        key: PRNGKeyArray,
+    ):
+        out, state = self.resnet(x, state, key=key)
+        out = self.head(out)
+        return out, state
+    
+    def expand_head(self, num_classes: int, *, key: PRNGKeyArray):
+        old_w = self.head.weight
+        old_b = self.head.bias
+        new_head = eqx.nn.Linear(self.head.in_features, old_w.shape[0] + num_classes, dtype=jnp.float32, key=key)
+        
+        new_w = jnp.concatenate([
+            old_w,
+            jax.nn.initializers.he_normal()(key, (num_classes, old_w.shape[1]), jnp.float32)
+        ], axis = 0)
+        
+        if old_b is not None:
+            new_b = jnp.concatenate([
+                old_b,
+                jnp.zeros(num_classes, dtype=jnp.float32)
+            ])
+        else:
+            new_b = None
+        
+        eqx.tree_at(lambda h: h.weight, new_head, new_w)
+        if new_b is not None:
+            eqx.tree_at(lambda h: h.bias, new_head, new_b)
+        
+        eqx.tree_at(lambda m: m.head, self, new_head)
+
+def kaiming_init_model(model, key):
+    leaves, treedef = jax.tree_util.tree_flatten(model)
+    keys = jax.random.split(key, len(leaves))
+    
+    def reinit(leaf, k):
+        if hasattr(leaf, "shape") and leaf.ndim >= 2:
+            return jax.nn.initializers.he_normal()(k, leaf.shape, leaf.dtype)
+        return leaf
+    
+    new_leaves = [reinit(leaf, k) for leaf, k in zip(leaves, keys)]
+    return jax.tree_util.tree_unflatten(treedef, new_leaves)

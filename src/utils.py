@@ -13,6 +13,8 @@ from src.poisioning.image_coruption import corruption_dict
 # from src.poisioning.pacol import PACOL
 from jaxtyping import Array, PRNGKeyArray
 from torch.utils.data import Dataset
+from optax import clip_by_global_norm
+from torchvision import transforms
 
 class CL_DataLoader:
     def __init__(
@@ -26,6 +28,7 @@ class CL_DataLoader:
         replay_buffer_size: int = 100,
         buffer_size: int = 3,
         workers: int = 1,
+        mutl_head: bool = False,
         dtype=jnp.float32,
         *,
         key: PRNGKeyArray,
@@ -40,6 +43,7 @@ class CL_DataLoader:
         self.workers = workers
         self.dtype = dtype
         self.replay_buffer_size = replay_buffer_size
+        self.multi_head = mutl_head
 
         self.len = getattr(dataset, "__len__", batch_size)
 
@@ -114,6 +118,9 @@ class CL_DataLoader:
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         return n // self.batch_size
+    
+    def update_batch_size(self, new_batch_size):
+        self.batch_size = new_batch_size
 
     def _prepare_batch(self, X, y, device, *, key):
         # if self.replay and key is not None:
@@ -127,12 +134,15 @@ class CL_DataLoader:
         y = jax.device_put(y, device)
         return X.astype(self.dtype), y.astype(jnp.int32)
 
-    def sample(self, task_n: int, poision: bool = False, *, key: PRNGKeyArray | None = None):
+    def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
 
         task_idx = self.tasks[task_n]
         n = jnp.sum(self.class_lengths[task_idx]).item()
         class_idx = self.class_indicies[task_idx].reshape(-1)
-        labels = np.repeat(task_idx, self.class_lengths[task_idx])
+        if self.multi_head:
+            labels = np.repeat(np.arange(len(task_idx)), self.class_lengths[task_idx]) 
+        else:
+            labels = np.repeat(task_idx, self.class_lengths[task_idx])
             
         if key is not None:
             shuffle = jax.random.permutation(key=key, x=n)
@@ -196,16 +206,90 @@ class CL_DataLoader:
     #     self.buffer_start = int(self.buffer_start + buffer_size)
     #     self.buffer_end = int(self.buffer_end + buffer_size)
 
-def _step(params, static, x, y, state, optim, opt_state, loss_fn, *, key):
+def load_data(data_set: str):
+    normalize_data = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+        ]
+    )
+    if data_set == "CIFAR100":
+        from torchvision.datasets import CIFAR100
+        train = CIFAR100(
+            root="Data/",
+            train=True,
+            transform=normalize_data,
+            download=True,
+        )
     
-    model = eqx.combine(params, static)
+        test = CIFAR100(
+            root="Data/",
+            train=False,
+            transform=normalize_data,
+            download=True,
+        )
+    
+    elif data_set == "FashionMNIST":
+        from torchvision.datasets import FashionMNIST
+        train = FashionMNIST(
+            root="Data/",
+            train=True,
+            transform=normalize_data,
+            download=True,
+        )
+    
+        test = FashionMNIST(
+            root="Data/",
+            train=False,
+            transform=normalize_data,
+            download=True,
+        )
+    
+    elif data_set == "MNIST":
+        from torchvision.datasets import MNIST
+        train = MNIST(
+            root="Data/",
+            train=True,
+            transform=normalize_data,
+            download=True,
+        )
+    
+        test = MNIST(
+            root="Data/",
+            train=False,
+            transform=normalize_data,
+            download=True,
+        )
+
+    else:
+        from torchvision.datasets import CIFAR10
+        train = CIFAR10(
+            root="Data/",
+            train=True,
+            transform=normalize_data,
+            download=True,
+        )
+    
+        test = CIFAR10(
+            root="Data/",
+            train=False,
+            transform=normalize_data,
+            download=True,
+        )
+    return train, test
+        
+def _step(model, x, y, state, optim, opt_state, loss_fn, *, key):
+    
+    # model = eqx.combine(params, static)
     (loss, (acc, state)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
         model, x, y, state, key
     )
-    updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    grads, _ = eqx.partition(grads, eqx.is_inexact_array)
+    grads = clip_by_global_norm(1).update(grads, opt_state)[0]
+    updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
     model = eqx.apply_updates(model, updates)
-    params, _ = eqx.partition(model, eqx.is_array)
-    return params, loss, acc, state, opt_state
+    # params, _ = eqx.partition(model, eqx.is_array)
+    return model, loss, acc, state, opt_state
 
 
 def eval(model, state, tasks, testloader, loss_fn, *, key):
@@ -287,8 +371,8 @@ def poinson_images(
         )
     return data
     
-def model_forward(model, x, state, key):
-    return model(x, state, key=key)
+def model_forward(model, x, state, task, key):
+    return model(x, state, task, key=key)
 
 # class PoisoningPlugin(SupervisedPlugin):
 #     """

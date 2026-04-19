@@ -16,7 +16,7 @@ def loss_fn(model, x, y, state, criterion, key):
     key, *keys = jax.random.split(key, x.shape[0]+1)
     keys = jnp.stack(keys)
     logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, 0))(
-        model, x, state, key
+        model, x, state, keys
     )
     loss = criterion(logits, y)
     loss = jnp.mean(loss)
@@ -24,7 +24,7 @@ def loss_fn(model, x, y, state, criterion, key):
     acc = jnp.mean(y == pred_y)
     return loss, (acc, state)
 
-eqx.filter_jit()
+@eqx.filter_jit
 def get_gradients(
     model: eqx.Module,
     state: State,
