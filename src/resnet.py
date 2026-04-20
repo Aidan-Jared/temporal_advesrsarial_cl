@@ -295,12 +295,16 @@ class multiHeadResNet(eqx.Module):
         self,
         x: Float[Array, "batch c w h"],
         state: PyTree,
-        task: int,
+        task: int | None,
         *,
         key: PRNGKeyArray,
     ):
         out, state = self.resnet(x, state, key=key)
-        out = self.heads[task](out)
+        if task is None:
+            out = jnp.concatenate([h(out) for h in self.heads], axis=-1)
+        else:
+            out = self.heads[task](out)
+            # out = [h(out) for h in self.heads][task]
         return out, state
     
     def add_head(self, num_classes: int, *, key: PRNGKeyArray) -> None:
@@ -309,7 +313,8 @@ class multiHeadResNet(eqx.Module):
         
         new_head = kaiming_init_model(new_head, subkey)
         
-        self.heads.append(new_head)
+        new_heads = self.heads + [new_head]
+        return eqx.tree_at(lambda m: m.heads, self, new_heads)
         
 
 class expandingHeadResNet(eqx.Module):

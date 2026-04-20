@@ -12,6 +12,7 @@ dependencies = [
     "optax>=0.2.8",
     "pandas>=3.0.1",
     "polars>=1.39.3",
+    "pyarrow>=23.0.1",
     "qpax>=0.0.10",
     "torch>=2.11.0",
     "torchvision>=0.26.0",

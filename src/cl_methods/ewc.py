@@ -6,11 +6,12 @@ import jax.numpy as jnp
 import numpy as np
 from equinox.nn._stateful import State
 
-from optax import softmax_cross_entropy_with_integer_labels, chain, cosine_decay_schedule
+from optax import softmax_cross_entropy_with_integer_labels
 from jaxtyping import Array, PRNGKeyArray, PyTree
 from tqdm import tqdm
 
 from src.utils import CL_DataLoader, _step, eval, model_forward
+from src.resnet import ResNet18
 
 
 def compute_importance(
@@ -81,7 +82,7 @@ def compute_importance(
 
 
 def update_importances(
-    new_importance: PyTree, importances: PyTree, task: int, alpha: float = .5
+    new_importance: PyTree, importances: PyTree, task: int, alpha: float = .3
 ) -> PyTree:
 
     if task == 0:
@@ -141,7 +142,7 @@ def ECW_penalty(
 
 
 def EWC_loss(
-    model: eqx.Module,
+    model:ResNet18,
     x: Array,
     y: Array,
     state: State,
@@ -170,7 +171,7 @@ def EWC_loss(
 
 
 def EWC_train(
-    model: eqx.Module,
+    model: ResNet18,
     state: eqx.nn.State,
     trainloader: CL_DataLoader,
     testloader: CL_DataLoader,
@@ -194,7 +195,7 @@ def EWC_train(
         model = eqx.nn.inference_mode(model, value=False)
         
         if task > 0 and hasattr(model, "add_head"):
-            model.add_head(len(trainloader.tasks[task]), key=key) #typing: ignore
+            model = model.add_head(len(trainloader.tasks[task]), key=key) #typing: ignore
 
         opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
         # params, static = eqx.partition(model, eqx.is_inexact_array)
@@ -243,7 +244,7 @@ def EWC_train(
             criteron=criterion,
             importances=importances,
             saved_params=saved_params,
-            task=task,
+            task=None,
             lambda_=lambda_,
         )
         # model = eqx.combine(params, static)

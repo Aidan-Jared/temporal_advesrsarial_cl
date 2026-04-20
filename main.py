@@ -18,8 +18,8 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--lr", type=float, default=.05)
-parser.add_argument("--batch_size", type=int, default=16)
-parser.add_argument("--task_epochs", type=int, default=3)
+parser.add_argument("--batch_size", type=int, default=128)
+parser.add_argument("--task_epochs", type=int, default=50)
 parser.add_argument("--data_set", type=str, default="CIFAR100")
 parser.add_argument("--task_splits", type=int, default=10)
 parser.add_argument("--model", type=str, default="multiHeadResNet")
@@ -80,7 +80,7 @@ def main():
     )
     
     testloader = CL_DataLoader(
-        test, batch_size=args.batch_size, splits=args.task_splits, dtype=dtype, key=subkey2, mutl_head=multi_head
+        test, batch_size=args.batch_size, splits=args.task_splits, dtype=dtype, key=subkey2
     )
     
     

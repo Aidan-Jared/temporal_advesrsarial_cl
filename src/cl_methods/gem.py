@@ -12,11 +12,11 @@ from tqdm import tqdm
 from src.utils import CL_DataLoader, eval, model_forward
 
 
-def loss_fn(model, x, y, state, criterion, key):
+def loss_fn(model, x, y, state, task, criterion, key):
     key, *keys = jax.random.split(key, x.shape[0]+1)
     keys = jnp.stack(keys)
-    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, 0))(
-        model, x, state, keys
+    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, None, 0))(
+        model, x, state, task, keys
     )
     loss = criterion(logits, y)
     loss = jnp.mean(loss)
@@ -24,7 +24,7 @@ def loss_fn(model, x, y, state, criterion, key):
     acc = jnp.mean(y == pred_y)
     return loss, (acc, state)
 
-@eqx.filter_jit
+# @eqx.filter_jit
 def get_gradients(
     model: eqx.Module,
     state: State,
@@ -33,12 +33,9 @@ def get_gradients(
     *,
     key: PRNGKeyArray,
 ) -> PyTree:
-    params, _ = eqx.partition(model, eqx.is_array)
-    grad_list = []
-    del params
-
-    def step(model, x, y, state, key):
-        loss, _ = loss_fn(model, x, y, state, criterion, key)
+    grad_list = [] 
+    def step(model, x, y, state, t, key):
+        loss, _ = loss_fn(model, x, y, state, t, criterion, key)
         return loss
 
     step = eqx.filter_grad(eqx.filter_jit(step))
@@ -46,7 +43,9 @@ def get_gradients(
     for t in memory.keys():
         x, y = memory[t]
         key, subkey = jax.random.split(key)
-        grads = step(model, x, y, state, subkey)
+        grads = step(model, x, y, state, t, subkey)
+        if hasattr(grads, "heads"):
+            grads = eqx.tree_at(lambda m: m.heads, grads, None)
         grad_list.append(grads)
     return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
 
@@ -61,7 +60,7 @@ def update_memory(
 ) -> dict[int, tuple[Array, Array]]:
     key, subkey = jax.random.split(key)
     size = 0
-    for idx, (x, y) in enumerate(data.sample(task, key=subkey)):
+    for (x, y) in data.sample(task, key=subkey):
         if x.shape[0] + size < task_samples:
             if task not in memory:
                 memory[task] = (x, y)
@@ -166,7 +165,7 @@ def train_step(
 ): 
 
     (loss, (acc, state)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
-        model, x, y, state, criterion, key
+        model, x, y, state, task, criterion, key
     )
     grads = method[method_name](G, grads, memory_strength, task)
     
@@ -242,6 +241,7 @@ def GEM_train(
                     pbar.set_postfix(
                         {
                             "task_train": task,
+                            "epoch": epoch + 1,
                             "batch": step + 1,
                             "loss": np.mean(task_loss),
                             "acc": np.mean(task_acc),
