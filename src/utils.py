@@ -307,7 +307,7 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
         )
         for step, (x, y) in pbar:
             key, subkey = jax.random.split(key)
-            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, key = subkey)
+            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, task = None, key = subkey)
             task_loss.append(loss)
             task_acc.append(acc)
             if step % 10 == 0:

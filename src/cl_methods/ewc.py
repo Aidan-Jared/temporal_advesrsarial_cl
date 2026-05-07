@@ -11,7 +11,8 @@ from jaxtyping import Array, PRNGKeyArray, PyTree
 from tqdm import tqdm
 
 from src.utils import CL_DataLoader, _step, eval, model_forward
-from src.resnet import ResNet18
+from src.resnet18 import ResNet18
+from src.resnet32 import ResNet32
 
 
 def compute_importance(
@@ -19,7 +20,6 @@ def compute_importance(
     state: State,
     task_n: int,
     data: CL_DataLoader,
-    batches: int,
     *,
     key: PRNGKeyArray,
 ) -> PyTree:
@@ -47,7 +47,7 @@ def compute_importance(
             grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)        
             
         importance = jax.tree.map(
-            lambda i, g: i + batches * g**2, importance, grads
+            lambda i, g: i + g**2, importance, grads
         )
         
 
@@ -63,8 +63,10 @@ def compute_importance(
         desc="fisher importance"
         # ncols=75,
     )
+    steps = 0
     for step, (x, y) in pbar:
         importance = step_fn(model, x, y, state, key, importance)
+        steps += 1
         # if step == batches - 1:
         #     break
 
@@ -73,7 +75,7 @@ def compute_importance(
     # jax.debug.print("mean importance: {x}", x = imp_magnitude)
     # jax.debug.breakpoint()
     importance = jax.tree.map(
-        lambda i: i / float(batches * data.batch_size), importance
+        lambda i: i / float(steps), importance
     )
     
     data.update_batch_size(old_batch_size)
@@ -89,7 +91,7 @@ def update_importances(
         return new_importance
         
     return jax.tree.map(
-        lambda n, o: (alpha * o + (1-alpha)*n),
+        lambda n, o: ((1- alpha) * o + (alpha)*n),
         new_importance, 
         importances, 
     )
@@ -142,7 +144,7 @@ def ECW_penalty(
 
 
 def EWC_loss(
-    model:ResNet18,
+    model:ResNet18 | ResNet32,
     x: Array,
     y: Array,
     state: State,
@@ -159,6 +161,9 @@ def EWC_loss(
     
     logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, None, 0), out_axes=(0, None))(model, x, state, task, keys)
 
+    # if task is None:
+    #     jax.debug.print("{}", y)
+    #     jax.debug.breakpoint()
     loss = criteron(logits, y)
     params, _ = eqx.partition(model, eqx.is_inexact_array)
     loss = jnp.mean(loss) + lambda_ * ECW_penalty(
@@ -171,19 +176,20 @@ def EWC_loss(
 
 
 def EWC_train(
-    model: ResNet18,
+    model: ResNet18 | ResNet32,
     state: eqx.nn.State,
     trainloader: CL_DataLoader,
     testloader: CL_DataLoader,
     optim,
-    lambda_: float,
     criterion: Callable,
     task_epochs: int,
     tasks: int,
     print_every: int,
     *,
     key: PRNGKeyArray,
+    **kwargs,
 ):
+    lambda_ = kwargs.get("lambda_", 5e5)
     importances = None
     saved_params = None
     results = []
@@ -253,7 +259,7 @@ def EWC_train(
         results.append(res)
         key, subkey = jax.random.split(key)
         importance = compute_importance(
-            model, state, task, trainloader, 20, key=subkey
+            model, state, task, trainloader, key=subkey
         )
         importances = update_importances(importance, importances, task)
         

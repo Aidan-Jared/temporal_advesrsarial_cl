@@ -4,47 +4,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from src.resnet18 import Drop_Path
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-
-SEED = 42
-KEY = jax.random.PRNGKey(SEED)
-
-
-class Drop_Path(eqx.Module):
-    p: float
-    inference: bool
-
-    def __init__(self, p: float, inference: bool = False):
-        self.p = p
-        self.inference = inference
-
-    def __call__(
-        self,
-        x: Array,
-        *,
-        key: PRNGKeyArray | None = None,
-    ):
-
-        def _drop(x, key):
-            key_prob = 1 - self.p
-            B = x.shape[0]
-            shape = (B,) + (1,) * (x.ndim - 1)
-
-            mask = jax.random.bernoulli(key, key_prob, shape)
-
-            output = (x * mask) / key_prob
-
-            return output
-                        
-        return jax.lax.cond(
-            self.p > 0.0 and not self.inference and key is not None,
-            _drop,
-            lambda x, k: x,
-            x,
-            key,
-        )
-
 
 class BasicBlock(eqx.Module):
     conv1: eqx.nn.Conv2d
@@ -76,7 +38,13 @@ class BasicBlock(eqx.Module):
             key=subkey1,
         )
         self.conv2 = eqx.nn.Conv2d(
-            out_chanels, out_chanels, kernel_size=3, stride=1, padding=1, dtype=dtype, key=subkey2
+            out_chanels, 
+            out_chanels, 
+            kernel_size=3, 
+            stride=1, 
+            padding=1, 
+            dtype=dtype,
+            key=subkey2
         )
 
         self.bn1 = eqx.nn.GroupNorm(8,out_chanels)
@@ -139,31 +107,33 @@ class BasicBlock(eqx.Module):
         return out, state
 
 
-class ResNet18(eqx.Module):
+class ResNet32(eqx.Module):
     conv1: eqx.nn.Conv2d
     bn1: eqx.nn.GroupNorm
     layer1: eqx.nn.Sequential
     layer2: eqx.nn.Sequential
     layer3: eqx.nn.Sequential
-    layer4: eqx.nn.Sequential
-
+    
     # fc: eqx.nn.Linear
 
-    hidden_channels: int
+    hidden_channels: int = eqx.field(static= True)
+    dropout: float = eqx.field(static=True)
 
     avgpool: eqx.nn.AdaptiveAvgPool2d
 
     def __init__(
         self,
         input_channels: int,
-        hidden_channels: int = 64,
+        hidden_channels: int = 16,
         num_classes: int = 10,
+        dropout: float = .1,
         dtype=jnp.float32,
         *,
         key: PRNGKeyArray,
     ):
-        subkey1, subkey2, subkey3, subkey4, subkey5, subkey6 = jax.random.split(key, 6)
+        subkey1, subkey2, subkey3, subkey4 = jax.random.split(key, 4)
         self.hidden_channels = hidden_channels
+        self.dropout = dropout
 
         self.conv1 = eqx.nn.Conv2d(
             input_channels,
@@ -178,16 +148,13 @@ class ResNet18(eqx.Module):
         self.bn1 = eqx.nn.GroupNorm(8, hidden_channels)
 
         self.layer1 = self._make_layer(
-            hidden_channels, num_blocks=2, stride=1, dtype=dtype, key=subkey2
+            hidden_channels, num_blocks=5, stride=1, dtype=dtype, key=subkey2
         )
         self.layer2 = self._make_layer(
-            hidden_channels * 2, num_blocks=2, stride=2, dtype=dtype, key=subkey3
+            hidden_channels * 2, num_blocks=5, stride=2, dtype=dtype, key=subkey3
         )
         self.layer3 = self._make_layer(
-            hidden_channels * 4, num_blocks=2, stride=2, dtype=dtype, key=subkey4
-        )
-        self.layer4 = self._make_layer(
-            hidden_channels * 8, num_blocks=2, stride=2, dtype=dtype, key=subkey5
+            hidden_channels * 4, num_blocks=5, stride=2, dtype=dtype, key=subkey4
         )
 
         self.avgpool = eqx.nn.AdaptiveAvgPool2d((1, 1))
@@ -202,7 +169,7 @@ class ResNet18(eqx.Module):
         for stride in strides:
             key, subkey = jax.random.split(key)
             layers.append(
-                BasicBlock(self.hidden_channels, out_channels, stride, dtype=dtype, key=subkey)
+                BasicBlock(self.hidden_channels, out_channels, stride, dropout = self.dropout, dtype=dtype, key=subkey)
             )
             self.hidden_channels = out_channels
         return eqx.nn.Sequential(layers)
@@ -227,9 +194,6 @@ class ResNet18(eqx.Module):
         for block in self.layer3:
             key, subkey = jax.random.split(key)
             out, state = block(x=out, state=state, key=subkey)
-        for block in self.layer4:
-            key, subkey = jax.random.split(key)
-            out, state = block(x=out, state=state, key=subkey)
 
         out = self.avgpool(out)
         out = out.reshape(
@@ -240,24 +204,24 @@ class ResNet18(eqx.Module):
 
         return out, state
 
-
-class singleHeadResNet(eqx.Module):
-    resnet: ResNet18
+class singleHeadResNet32(eqx.Module):
+    resnet: ResNet32
     fc: eqx.nn.Linear
     
     def __init__(
         self,
         input_channels: int,
-        hidden_channels: int = 64,
+        hidden_channels: int = 16,
         num_classes: int = 10,
         num_splits: int = 0, #not used but here for compatibility
+        dropout: float = .1,
         dtype=jnp.float32,
         *,
         key: PRNGKeyArray,
     ):
         subkey1, subkey2 = jax.random.split(key)
-        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
-        self.fc = eqx.nn.Linear(hidden_channels * 8, num_classes, dtype=dtype, key=subkey2)
+        self.resnet = ResNet32(input_channels, hidden_channels, num_classes, dropout, dtype, key=subkey1)
+        self.fc = eqx.nn.Linear(hidden_channels * 4, num_classes, dtype=dtype, key=subkey2)
         
     def __call__(
         self,
@@ -271,25 +235,26 @@ class singleHeadResNet(eqx.Module):
         out = self.fc(out)
         return out, state
 
-class multiHeadResNet(eqx.Module):
-    resnet: ResNet18
+class multiHeadResNet32(eqx.Module):
+    resnet: ResNet32
     heads: list[eqx.nn.Linear]
     datatype: jnp.dtype = eqx.field(static=True)
     
     def __init__(
         self,
         input_channels: int,
-        hidden_channels: int = 64,
+        hidden_channels: int = 16,
         num_classes: int = 10,
-        num_splits: int = 5, 
+        num_splits: int = 5,
+        dropout: float = .1,
         dtype=jnp.float32,
         *,
         key: PRNGKeyArray,
     ):
         self.datatype = dtype
         subkey1, subkey2 = jax.random.split(key)
-        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
-        self.heads = [eqx.nn.Linear(hidden_channels * 8, num_classes // num_splits, dtype=dtype, key = subkey2)]
+        self.resnet = ResNet32(input_channels, hidden_channels, num_classes, dropout, dtype, key=subkey1)
+        self.heads = [eqx.nn.Linear(hidden_channels * 4, num_classes // num_splits, dtype=dtype, key = subkey2)]
     
     def __call__(
         self,
@@ -303,7 +268,7 @@ class multiHeadResNet(eqx.Module):
         if task is None:
             out = jnp.concatenate([h(out) for h in self.heads], axis=-1)
         else:
-            out = self.heads[task](out)
+            out = self.heads[task](out)            
             # out = [h(out) for h in self.heads][task]
         return out, state
     
@@ -318,13 +283,13 @@ class multiHeadResNet(eqx.Module):
         
 
 class expandingHeadResNet(eqx.Module):
-    resnet: ResNet18
+    resnet: ResNet32
     heads: list[eqx.nn.Linear]
     
     def __init__(
         self,
         input_channels: int,
-        hidden_channels: int = 64,
+        hidden_channels: int = 16,
         num_classes: int = 10,
         num_splits: int = 5, 
         dtype=jnp.float32,
@@ -332,8 +297,8 @@ class expandingHeadResNet(eqx.Module):
         key: PRNGKeyArray,
     ):
         subkey1, subkey2 = jax.random.split(key)
-        self.resnet = ResNet18(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
-        self.head = eqx.nn.Linear(hidden_channels * 8, num_classes // num_splits, dtype=dtype, key=subkey2)
+        self.resnet = ResNet32(input_channels, hidden_channels, num_classes, dtype, key=subkey1)
+        self.head = eqx.nn.Linear(hidden_channels * 4, num_classes // num_splits, dtype=dtype, key=subkey2)
     
     def __call__(
         self,
