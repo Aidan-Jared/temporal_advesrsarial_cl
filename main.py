@@ -12,21 +12,24 @@ from src.utils import CL_DataLoader, poinson_images, load_data
 
 import argparse
 import os
+import ast
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
+def parse_list(arg):
+    return ast.literal_eval(arg)
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--seed", type=list, default=[42])
+parser.add_argument("--seed", type=parse_list, default=[42])
 #ewc: .05, gem: 1e-4, agem: 1e-4
 parser.add_argument("--lr", type=float, default=.05)
-parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument("--batch_size", type=int, default=128)
 #ewc: 5, gem: 1, agem: 1
-parser.add_argument("--task_epochs", type=int, default=10)
+parser.add_argument("--task_epochs", type=int, default=1)
 parser.add_argument("--data_set", type=str, default="CIFAR10")
-parser.add_argument("--task_splits", type=int, default=5)
+parser.add_argument("--task_splits", type=int, default=2)
 parser.add_argument("--model", type=str, default="multiHeadResNet32")
-parser.add_argument("--norm", type=list, default=[(0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)])
+parser.add_argument("--norm", type=parse_list, default=[(0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)])
 
 # Dataset Mean Std
 # MNIST (0.1307,) (0.3081,)
@@ -39,8 +42,8 @@ parser.add_argument("--lambda_", type=float, default=5e3)
 parser.add_argument("--mem_strength", type=float, default=.5)
 parser.add_argument("--mem_size", type=int, default=256)
 
-parser.add_argument("--poison_attacks", type=list, default=["gaussian_noise","shot_noise"])
-parser.add_argument("--poison_tasks", type=list, default=[0])
+parser.add_argument("--poison_attacks", type=parse_list, default=["gaussian_noise","shot_noise"])
+parser.add_argument("--poison_tasks", type=parse_list, default=[0])
 parser.add_argument("--pcp", type=float, default=.5)
 parser.add_argument("--pp", type=float, default=.5)
 
@@ -64,7 +67,9 @@ models = {
 # https://github.com/ContinualAI/continual-learning-baselines/tree/main/experiments
 
 def main():
+    df = pd.DataFrame()
     for seed in args.seed:
+        print(type(seed))
         KEY = jax.random.PRNGKey(seed)
         train, test = load_data(args.data_set)
 
@@ -120,10 +125,14 @@ def main():
         # p_model, results = GEM_train(
         #     p_model, state, trainloader, testloader, optim, criterion, task_epochs=1, tasks=5, print_every=10, method_name = "AGEM", memory_strength=10, task_samples = 10, key=subkey1
         # )
-    
-        df = pd.DataFrame(results)
-        df.to_parquet("experiment_res/ewc_results.parquet")
-        print(df)
+        meta = {"seed": seed, "model": args.model, "method": args.method, "data_set": args.data_set, **kwargs}
+        results = [{**r, **meta} for r in results]
+        
+        df = pd.concat([df, pd.DataFrame(results)])
+
+    path = f"experiment_res/{args.method}_{args.model}_{args.data_set}.parquet"
+    df.to_parquet(path)
+    print(df)
 
 
 if __name__ == "__main__":
