@@ -10,8 +10,8 @@ from jaxtyping import Array, PRNGKeyArray, PyTree
 from tqdm import tqdm
 
 from src.utils import CL_DataLoader, eval, model_forward
-from src.resnet18 import ResNet18
-from src.resnet32 import ResNet32
+from src.models.resnet18 import ResNet18
+from src.models.resnet32 import ResNet32
 
 
 def loss_fn(model, x, y, state, task, criterion, key):

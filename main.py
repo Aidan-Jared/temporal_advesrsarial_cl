@@ -6,8 +6,8 @@ import pandas as pd
 
 from src.cl_methods.ewc import EWC_train
 from src.cl_methods.gem import GEM_train
-from src.resnet18 import singleHeadResNet18, multiHeadResNet18, kaiming_init_model
-from src.resnet32 import singleHeadResNet32, multiHeadResNet32
+from src.models.resnet18 import singleHeadResNet18, multiHeadResNet18, kaiming_init_model
+from src.models.resnet32 import singleHeadResNet32, multiHeadResNet32
 from src.utils import CL_DataLoader, poinson_images, load_data
 
 import argparse

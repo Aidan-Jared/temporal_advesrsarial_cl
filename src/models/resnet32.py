@@ -4,7 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree
-from src.resnet18 import Drop_Path
+from src.models.resnet18 import Drop_Path
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
