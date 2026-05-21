@@ -116,19 +116,20 @@ def train_step(
 
 def train_der(
     model,
+    state: State,
     trainloader: CL_DataLoader,
     testloader: CL_DataLoader,
-    tasks: int,
-    epochs: int,
-    state: State,
     optim: GradientTransformationExtraArgs,
-    der_alpha: float = 0.5,
-    beta: float = 0.0,
-    selection_method: Callable | None = None,
+    criterion: Callable,  # for compatiability
+    epochs: int,
+    tasks: int,
     print_every: int = 10,
     *,
     key: PRNGKeyArray,
+    **kwargs,
 ):
+    der_alpha = kwargs.get("der_alpha", 0.5)
+    beta = kwargs.get("der_beta", 0.5)
     batch_size = trainloader.batch_size
     results = []
     train_step_jit = eqx.filter_jit(train_step)

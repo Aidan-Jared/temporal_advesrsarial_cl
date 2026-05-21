@@ -4,12 +4,15 @@
 set -e
 
 uv run main.py \
-  --seed "[42]"\
+  --seed "42"\
   --lr .05\
   --batch_size 16\
   --task_epochs 25\
   --data_set "CIFAR100"\
   --task_splits 5\
+  --dropout 0.0\
+  --transform True\
+  --task-shuffle False\
   --model "multiHeadResNet32"\
   --norm "[(0.5071, 0.4867, 0.4408),(0.2675, 0.2565, 0.2761)]"\
   --method "EWC"\
