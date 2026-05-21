@@ -41,44 +41,41 @@ def der_loss(
 
     acc = jnp.mean(jnp.argmax(logits, axis=1) == y)
 
-    loss = softmax_cross_entropy_with_integer_labels(
-        logits[:batch_size], y[:batch_size]
+    loss = jnp.mean(
+        softmax_cross_entropy_with_integer_labels(logits[:batch_size], y[:batch_size])
     )
     sloss = jax.lax.cond(
         buffer_filled,
-        lambda: (
-            der_alpha
-            * jnp.mean(
-                (
-                    logits[batch_size : batch_size + old_logits.shape[0] // 2]
-                    - old_logits[: old_logits.shape[0] // 2]
-                )
-                ** 2
+        lambda: der_alpha
+        * jnp.mean(
+            (
+                logits[batch_size : batch_size + old_logits.shape[0] // 2]
+                - old_logits[: old_logits.shape[0] // 2]
             )
+            ** 2
         ),
         lambda: 0.0,
     )
     loss += sloss
-    # jax.debug.breakpoint()
+    # jax.debug.print("{}", sloss)
     if beta != 0.0:
         sloss = jax.lax.cond(
             buffer_filled,
-            lambda: (
-                beta
-                * jnp.mean(
-                    softmax_cross_entropy_with_integer_labels(
-                        logits[batch_size + old_logits.shape[0] // 2 :],
-                        y[batch_size + old_logits.shape[0] // 2 :],
-                    )
+            lambda: beta
+            * jnp.mean(
+                softmax_cross_entropy_with_integer_labels(
+                    logits[batch_size + old_logits.shape[0] // 2 :],
+                    y[batch_size + old_logits.shape[0] // 2 :],
                 )
             ),
             lambda: 0.0,
         )
         # jax.debug.print("{}", y[batch_size:])
         # jax.debug.breakpoint()
+        # jax.debug.print("{}", sloss)
         loss += sloss
     # jax.debug.breakpoint()
-    return jnp.mean(loss), (logits, acc, state)  # typing: ignore
+    return loss, (logits, acc, state)  # typing: ignore
 
 
 def train_step(
@@ -135,9 +132,9 @@ def train_der(
     batch_size = trainloader.batch_size
     results = []
     train_step_jit = eqx.filter_jit(train_step)
+    opt_state = optim.init(eqx.filter(model, eqx.is_array))
     for task in range(tasks):
         model = eqx.nn.inference_mode(model, False)
-        opt_state = optim.init(eqx.filter(model, eqx.is_array))
         print(f"training task {task}")
         print("-" * 50)
         for epoch in range(epochs):
@@ -169,7 +166,11 @@ def train_der(
                 )
 
                 trainloader.add_to_buffer(
-                    indexes, y, logits, selection_method, key=subkey2
+                    indexes[:batch_size],
+                    y[:batch_size],
+                    logits[:batch_size],
+                    selection_method,
+                    key=subkey2,
                 )
 
                 epoch_loss.append(loss)

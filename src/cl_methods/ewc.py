@@ -10,7 +10,8 @@ from optax import softmax_cross_entropy_with_integer_labels
 from jaxtyping import Array, PRNGKeyArray, PyTree
 from tqdm import tqdm
 
-from src.utils import CL_DataLoader, _step, eval, model_forward
+from src.utils import _step, eval, model_forward
+from src.dataloader import CL_DataLoader
 from src.models.resnet18 import ResNet18
 from src.models.resnet32 import ResNet32
 
@@ -25,18 +26,22 @@ def compute_importance(
 ) -> PyTree:
     model = eqx.nn.inference_mode(model, value=True)
     params, _ = eqx.partition(model, eqx.is_inexact_array)
-    
+
     if hasattr(params, "heads"):
-        params = eqx.tree_at(lambda m: m.heads, params, replace_fn=lambda x: None)        
+        params = eqx.tree_at(lambda m: m.heads, params, replace_fn=lambda x: None)
 
     importance = jax.tree.map(lambda x: jnp.zeros(x.shape), params)
     key, subkey = jax.random.split(key)
     del params
 
     def step_fn(model, x, y, state, key, importance) -> PyTree:
-        
         def loss_fn(model, x, y, state, key) -> Array:
-            logits, _ = jax.vmap(model_forward, axis_name = "batch", in_axes=(None, 0, None, None, None), out_axes = (0, None))(model, x, state, task_n, key)
+            logits, _ = jax.vmap(
+                model_forward,
+                axis_name="batch",
+                in_axes=(None, 0, None, None, None),
+                out_axes=(0, None),
+            )(model, x, state, task_n, key)
             # loss = jax.nn.log_softmax(logits)
             loss = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, y))
             return loss
@@ -44,56 +49,49 @@ def compute_importance(
         grads = eqx.filter_grad(loss_fn)(model, x, y, state, key)
 
         if hasattr(grads, "heads"):
-            grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)        
-            
-        importance = jax.tree.map(
-            lambda i, g: i + g**2, importance, grads
-        )
-        
+            grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
+
+        importance = jax.tree.map(lambda i, g: i + g**2, importance, grads)
 
         return importance
 
     step_fn = eqx.filter_jit(step_fn)
-    
+
     old_batch_size = data.batch_size
     data.update_batch_size(128)
-    
+
     pbar = tqdm(
         enumerate(data.sample(task_n, key=subkey)),
-        desc="fisher importance"
+        desc="fisher importance",
         # ncols=75,
     )
     steps = 0
-    for step, (x, y) in pbar:
+    for step, (x, y, _, _, _) in pbar:
         importance = step_fn(model, x, y, state, key, importance)
         steps += 1
         # if step == batches - 1:
         #     break
 
-    
     # imp_magnitude = jax.tree_util.tree_leaves(importance)
     # jax.debug.print("mean importance: {x}", x = imp_magnitude)
     # jax.debug.breakpoint()
-    importance = jax.tree.map(
-        lambda i: i / float(steps), importance
-    )
-    
+    importance = jax.tree.map(lambda i: i / float(steps), importance)
+
     data.update_batch_size(old_batch_size)
-    
+
     return importance
 
 
 def update_importances(
-    new_importance: PyTree, importances: PyTree, task: int, alpha: float = .3
+    new_importance: PyTree, importances: PyTree, task: int, alpha: float = 0.3
 ) -> PyTree:
-
     if task == 0:
         return new_importance
-        
+
     return jax.tree.map(
-        lambda n, o: ((1- alpha) * o + (alpha)*n),
-        new_importance, 
-        importances, 
+        lambda n, o: ((1 - alpha) * o + (alpha) * n),
+        new_importance,
+        importances,
     )
 
 
@@ -103,9 +101,8 @@ def ECW_penalty(
     current_param: PyTree,
     task: int,
 ) -> Array:
-
     penalty = jnp.zeros(())
-    
+
     def standard(penalty):
         # for exp in range(task
         if hasattr(current_param, "heads"):
@@ -113,38 +110,38 @@ def ECW_penalty(
         else:
             c = current_param
         penalty = jnp.sum(
-        jnp.array(
-            jax.tree_util.tree_leaves(
-                jax.tree.map(
-                    lambda i, c, s: jnp.sum(i * (s - c) ** 2) / 2,
-                    importances,
-                    c,
-                    saved_params,
+            jnp.array(
+                jax.tree_util.tree_leaves(
+                    jax.tree.map(
+                        lambda i, c, s: jnp.sum(i * (s - c) ** 2) / 2,
+                        importances,
+                        c,
+                        saved_params,
+                    )
                 )
             )
         )
-    )
-        
+
         # imp_magnitude = jax.tree_util.tree_leaves(saved_params)
         # jax.debug.print("mean importance: {x}", x = imp_magnitude)
         # jax.debug.breakpoint()
-        return penalty    
-    
+        return penalty
+
     if importances is None:
         return penalty
     else:
-        return standard(penalty) 
+        return standard(penalty)
 
     # return jax.lax.cond(
-    #     task == 0, 
-    #     lambda p: p, 
-    #     standard, 
+    #     task == 0,
+    #     lambda p: p,
+    #     standard,
     #     penalty
     # )
 
 
 def EWC_loss(
-    model:ResNet18 | ResNet32,
+    model: ResNet18 | ResNet32,
     x: Array,
     y: Array,
     state: State,
@@ -155,11 +152,12 @@ def EWC_loss(
     task: int,
     lambda_: float,
 ) -> tuple[Array, tuple[Array, State]]:
-
     key, *keys = jax.random.split(key, x.shape[0] + 1)
     keys = jnp.vstack(keys)
-    
-    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, None, 0), out_axes=(0, None))(model, x, state, task, keys)
+
+    logits, state = jax.vmap(
+        model_forward, in_axes=(None, 0, None, None, 0), out_axes=(0, None)
+    )(model, x, state, task, keys)
 
     # if task is None:
     #     jax.debug.print("{}", y)
@@ -193,15 +191,16 @@ def EWC_train(
     importances = None
     saved_params = None
     results = []
-    
 
     for task in range(tasks):
         task_loss = []
         task_acc = []
         model = eqx.nn.inference_mode(model, value=False)
-        
+
         if task > 0 and hasattr(model, "add_head"):
-            model = model.add_head(len(trainloader.tasks[task]), key=key) #typing: ignore
+            model = model.add_head(
+                len(trainloader.tasks[task]), key=key
+            )  # typing: ignore
 
         opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
         # params, static = eqx.partition(model, eqx.is_inexact_array)
@@ -213,7 +212,7 @@ def EWC_train(
                 total=trainloader.iters(task),
                 # ncols=75,
             )
-            for step, (x, y) in pbar:
+            for step, (x, y, _, _, _) in pbar:
                 loss_fn = jax.tree_util.Partial(
                     EWC_loss,
                     criteron=criterion,
@@ -224,9 +223,9 @@ def EWC_train(
                 )
 
                 key, subkey = jax.random.split(key)
-                model, loss, acc, state, opt_state = eqx.filter_jit(
-                    _step
-                )(model, x, y, state, optim, opt_state, loss_fn, key=subkey)
+                model, loss, acc, state, opt_state = eqx.filter_jit(_step)(
+                    model, x, y, state, optim, opt_state, loss_fn, key=subkey
+                )
 
                 task_loss.append(loss)
                 task_acc.append(acc)
@@ -258,16 +257,16 @@ def EWC_train(
         res = eval(model, state, tasks, testloader, loss_fn, key=key)
         results.append(res)
         key, subkey = jax.random.split(key)
-        importance = compute_importance(
-            model, state, task, trainloader, key=subkey
-        )
+        importance = compute_importance(model, state, task, trainloader, key=subkey)
         importances = update_importances(importance, importances, task)
-        
+
         params, static = eqx.partition(model, eqx.is_inexact_array)
-        
-        saved_params= jax.tree.map(jnp.array, params)
-        if hasattr(saved_params, "heads"):            
-            saved_params = eqx.tree_at(lambda m: m.heads, saved_params, replace_fn=lambda x: None)
+
+        saved_params = jax.tree.map(jnp.array, params)
+        if hasattr(saved_params, "heads"):
+            saved_params = eqx.tree_at(
+                lambda m: m.heads, saved_params, replace_fn=lambda x: None
+            )
 
         del params, static
         jax.clear_caches()

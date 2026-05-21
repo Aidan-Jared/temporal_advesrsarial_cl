@@ -1,6 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -10,201 +7,11 @@ from tqdm import tqdm
 # from src.cl_methods import replay
 
 from src.poisioning.image_coruption import corruption_dict
-# from src.poisioning.pacol import PACOL
+from src.dataloader import CL_DataLoader
 from jaxtyping import Array, PRNGKeyArray
-from torch.utils.data import Dataset
 from optax import clip_by_global_norm
 from torchvision import transforms
 
-class CL_DataLoader:
-    def __init__(
-        self,
-        dataset: Dataset,
-        batch_size: int,
-        splits: int,
-        device: str = "cpu",
-        iter_device: str = "gpu",
-        replay: bool = False,
-        replay_buffer_size: int = 100,
-        buffer_size: int = 3,
-        workers: int = 1,
-        mutl_head: bool = False,
-        dtype=jnp.float32,
-        *,
-        key: PRNGKeyArray,
-    ) -> None:
-        self.splits = splits
-        self.batch_size = batch_size
-        self.seen_tasks = []
-        self.device = device
-        self.iter_device = iter_device
-        self.replay = replay
-        self.buffer_size = buffer_size
-        self.workers = workers
-        self.dtype = dtype
-        self.replay_buffer_size = replay_buffer_size
-        self.multi_head = mutl_head
-
-        self.len = getattr(dataset, "__len__", batch_size)
-
-        class_to_indices = {}
-        all_data = []
-        for idx, (data, label) in enumerate(dataset):  # type: ignore
-            if isinstance(data, jnp.ndarray):
-                all_data.append(np.array(data))
-            else:
-                all_data.append(data.numpy() * 255)
-
-            label_int = int(label)
-            if label_int not in class_to_indices:
-                class_to_indices[label_int] = []
-
-            class_to_indices[label_int].append(idx)
-
-        device = jax.devices(device)[0]
-
-        all_data_np = np.stack(all_data)
-
-        self.all_data = jax.device_put(all_data_np, device).astype(jnp.uint8)
-
-        self.num_classes = len(class_to_indices)
-
-        max_samples_per_class = max(len(v) for v in class_to_indices.values())
-
-        self.class_indicies = jax.device_put(
-            jnp.full((self.num_classes, max_samples_per_class), -1, dtype=jnp.int32),
-            device,
-        )
-
-        self.class_lengths = jax.device_put(
-            jnp.zeros(self.num_classes, dtype=jnp.int32), device
-        )
-
-        for class_idx, (label, idx) in enumerate(sorted(class_to_indices.items())):
-            num_samples = len(idx)
-            self.class_indicies = self.class_indicies.at[class_idx, :num_samples].set(
-                jnp.array(idx, dtype=jnp.int32)
-            )
-
-            self.class_lengths = self.class_lengths.at[class_idx].set(num_samples)
-
-        self.tasks = np.arange(self.num_classes).reshape((self.splits, -1))
-
-        # if replay:
-        #     self.buffer = jnp.zeros(shape=(self.replay_buffer_size, *self.all_data.shape[1:]), dtype=jnp.int32, device=device)
-        #     self.buffer_labels = jnp.zeros(shape=(self.replay_buffer_size,), dtype=jnp.int32, device=device)
-        #     self.buffer_start = 0
-        #     self.buffer_end = self.buffer_size // self.splits
-
-    @staticmethod
-    @jax.jit
-    def _norm(X, mean, std):
-        return (X - mean) / std
-    
-    def __len__(self) -> int:
-        return self.len
-
-    def normalize(
-        self,
-        mean: tuple | float,
-        std: tuple | float,
-    ):
-        self.mean = jnp.array(mean)  # typing:ignore
-        self.std = jnp.array(std)  # typing:ignore
-        self.mean = jnp.expand_dims(self.mean, axis=(0, 2, 3))
-        self.std = jnp.expand_dims(self.std, axis=(0, 2, 3))
-
-    def iters(self, task_n: int) -> int:
-        task_idx = self.tasks[task_n]
-        n = jnp.sum(self.class_lengths[task_idx]).item()
-        return n // self.batch_size
-    
-    def update_batch_size(self, new_batch_size):
-        self.batch_size = new_batch_size
-
-    def _prepare_batch(self, X, y, device, *, key):
-        # if self.replay and key is not None:
-        #     idx = jax.random.permutation(key, jnp.sum(jnp.where(self.buffer_labels != 0, 1, 0)))
-        #     X = jnp.concatenate([X, self.buffer[idx]])
-        #     y = jnp.concatenate([y, self.buffer_labels[idx]])
-        X = jax.jit(lambda x: x / 255.0)(X)
-        if hasattr(self, "mean") and hasattr(self, "std"):
-            X = self._norm(X, self.mean, self.std)
-        X = jax.device_put(X, device)
-        y = jax.device_put(y, device)
-        return X.astype(self.dtype), y.astype(jnp.int32)
-
-    def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
-
-        task_idx = self.tasks[task_n]
-        n = jnp.sum(self.class_lengths[task_idx]).item()
-        class_idx = self.class_indicies[task_idx].reshape(-1)
-        if self.multi_head:
-            labels = np.repeat(np.arange(len(task_idx)), self.class_lengths[task_idx]) 
-        else:
-            labels = np.repeat(task_idx, self.class_lengths[task_idx])
-            
-        if key is not None:
-            shuffle = jax.random.permutation(key=key, x=n)
-            class_idx = class_idx[shuffle]
-            labels = labels[shuffle]
-
-        batches = n // self.batch_size
-        class_idx = class_idx[: batches * self.batch_size].reshape(
-            batches, self.batch_size
-        )
-        labels = labels[: batches * self.batch_size].reshape(batches, self.batch_size)
-
-        device = jax.devices(self.iter_device)[0]
-
-        def raw_generator():
-            for i in range(batches):
-                X = self.all_data[class_idx[i]]
-                y = labels[i]
-                yield (X, y)
-
-        yield from self._prefetch(raw_generator(), device, self.buffer_size, key=key)
-
-    def _prefetch(self, generator, device, buffer_size: int, *, key):
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            futures = []
-            for item in generator:
-                if key is not None:
-                    key, subkey = jax.random.split(key)
-                else:
-                    subkey = None
-                futures.append(
-                    executor.submit(self._prepare_batch, item[0], item[1], device, key=subkey)
-                )
-                if len(futures) >= buffer_size:
-                    yield futures.pop(0).result()
-            while futures:
-                yield futures.pop(0).result()
-
-    # def add_to_buffer(
-    #     self,
-    #     task_n: int,
-    #     buffer_size: int,
-    #     selection_method: Callable | None = None,
-    #     *,
-    #     key: PRNGKeyArray,
-    # ):
-    #     if not hasattr(self, 'buffer'):
-    #         return
-    #     if selection_method is None:
-    #         selection_method = replay.random_selection
-    #     sampled_data, sampled_labels = selection_method(self, task_n, buffer_size, key=key)
-    #     sampled_data = jax.device_put(sampled_data, device = self.buffer.device)
-    #     sampled_labels = jax.device_put(sampled_labels, device = self.buffer_labels.device)
-        
-    #     if self.buffer_start + sampled_data.shape[0] > self.replay_buffer_size:
-    #         diff = self.replay_buffer_size - self.buffer_start
-    #         sampled_data = sampled_data[:diff]
-    #         sampled_labels = sampled_labels[:diff]
-    #     self.buffer = self.buffer.at[self.buffer_start:self.buffer_end].set(sampled_data)
-    #     self.buffer_labels = self.buffer_labels.at[self.buffer_start:self.buffer_end].set(sampled_labels)
-    #     self.buffer_start = int(self.buffer_start + buffer_size)
-    #     self.buffer_end = int(self.buffer_end + buffer_size)
 
 def load_data(data_set: str):
     normalize_data = transforms.Compose(
@@ -215,45 +22,48 @@ def load_data(data_set: str):
     )
     if data_set == "CIFAR100":
         from torchvision.datasets import CIFAR100
+
         train = CIFAR100(
             root="Data/",
             train=True,
             transform=normalize_data,
             download=True,
         )
-    
+
         test = CIFAR100(
             root="Data/",
             train=False,
             transform=normalize_data,
             download=True,
         )
-    
+
     elif data_set == "FashionMNIST":
         from torchvision.datasets import FashionMNIST
+
         train = FashionMNIST(
             root="Data/",
             train=True,
             transform=normalize_data,
             download=True,
         )
-    
+
         test = FashionMNIST(
             root="Data/",
             train=False,
             transform=normalize_data,
             download=True,
         )
-    
+
     elif data_set == "MNIST":
         from torchvision.datasets import MNIST
+
         train = MNIST(
             root="Data/",
             train=True,
             transform=normalize_data,
             download=True,
         )
-    
+
         test = MNIST(
             root="Data/",
             train=False,
@@ -261,15 +71,50 @@ def load_data(data_set: str):
             download=True,
         )
 
+    elif data_set == "Food101":
+        from torchvision.datasets import Food101
+
+        train = Food101(
+            root="Data/",
+            split="train",
+            transform=normalize_data,
+            download=True,
+        )
+
+        test = Food101(
+            root="Data/",
+            split="test",
+            transform=normalize_data,
+            download=True,
+        )
+
+    elif data_set == "ImageNet":
+        from torchvision.datasets import ImageNet
+
+        train = ImageNet(
+            root="Data/",
+            split="train",
+            transform=normalize_data,
+            download=True,
+        )
+
+        test = ImageNet(
+            root="Data/",
+            split="test",
+            transform=normalize_data,
+            download=True,
+        )
+
     else:
         from torchvision.datasets import CIFAR10
+
         train = CIFAR10(
             root="Data/",
             train=True,
             transform=normalize_data,
             download=True,
         )
-    
+
         test = CIFAR10(
             root="Data/",
             train=False,
@@ -277,16 +122,18 @@ def load_data(data_set: str):
             download=True,
         )
     return train, test
-        
+
+
 def _step(model, x, y, state, optim, opt_state, loss_fn, *, key):
-    
     # model = eqx.combine(params, static)
     (loss, (acc, state)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
         model, x, y, state, key
     )
     grads, _ = eqx.partition(grads, eqx.is_inexact_array)
     grads = clip_by_global_norm(1).update(grads, opt_state)[0]
-    updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
+    updates, opt_state = optim.update(
+        grads, opt_state, eqx.filter(model, eqx.is_inexact_array)
+    )
     model = eqx.apply_updates(model, updates)
     # params, _ = eqx.partition(model, eqx.is_array)
     return model, loss, acc, state, opt_state
@@ -305,9 +152,11 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
             total=testloader.iters(p_task),
             ncols=75,
         )
-        for step, (x, y) in pbar:
+        for step, (x, y, _, _, _) in pbar:
             key, subkey = jax.random.split(key)
-            loss, (acc, _) = loss_fn(model = model, x = x, y = y, state = state, task = None, key = subkey)
+            loss, (acc, _) = loss_fn(
+                model=model, x=x, y=y, state=state, task=None, key=subkey
+            )
             task_loss.append(loss)
             task_acc.append(acc)
             if step % 10 == 0:
@@ -370,152 +219,198 @@ def poinson_images(
             )
         )
     return data
-    
+
+
 def model_forward(model, x, state, task, key):
     return model(x, state, task, key=key)
 
-# class PoisoningPlugin(SupervisedPlugin):
-#     """
-#     applies a posioning attack to the provided strategy
-#     """
 
+# class CL_DataLoader:
 #     def __init__(
 #         self,
-#         attack: PACOL,
-#         start_after: int = 1,
-#         pcp: float = 0.5,
-#         pn: int = 1,
-#         pp: float = 0.5,
-#         target_experiance: int = 1,
-#     ):
-#         """
-#         attack: type of attack to apply
-#         poison_to: task to stop poisioning at
-#         pcp: poisoned class percentage, how many classes to poison from the task
-#         pn: number of poisoning methods to use
-#         pp: percent of data to poision
-#         """
-#         super().__init__()
-#         self.attack: PACOL = attack
-#         self.start_after: int = start_after
-#         self.pcp: float = pcp
-#         self.pn: int = pn
-#         self.pp: float = pp
-#         self.restore: bool = True
-#         self.target_training: bool = False
-#         self.target_grad: bool = True
-#         self.target_experiance: int = target_experiance
-#         self.flip_data = None
+#         dataset: Dataset,
+#         batch_size: int,
+#         splits: int,
+#         device: str = "cpu",
+#         iter_device: str = "gpu",
+#         replay: bool = False,
+#         replay_buffer_size: int = 100,
+#         buffer_size: int = 3,
+#         workers: int = 1,
+#         mutl_head: bool = False,
+#         dtype=jnp.float32,
+#         *,
+#         key: PRNGKeyArray,
+#     ) -> None:
+#         self.splits = splits
+#         self.batch_size = batch_size
+#         self.seen_tasks = []
+#         self.device = device
+#         self.iter_device = iter_device
+#         self.replay = replay
+#         self.buffer_size = buffer_size
+#         self.workers = workers
+#         self.dtype = dtype
+#         self.replay_buffer_size = replay_buffer_size
+#         self.multi_head = mutl_head
 
-#     def _poison_data(
+#         self.len = getattr(dataset, "__len__", batch_size)
+
+#         class_to_indices = {}
+#         all_data = []
+#         for idx, (data, label) in enumerate(dataset):  # type: ignore
+#             if isinstance(data, jnp.ndarray):
+#                 all_data.append(np.array(data))
+#             else:
+#                 all_data.append(data.numpy() * 255)
+
+#             label_int = int(label)
+#             if label_int not in class_to_indices:
+#                 class_to_indices[label_int] = []
+
+#             class_to_indices[label_int].append(idx)
+
+#         device = jax.devices(device)[0]
+
+#         all_data_np = np.stack(all_data)
+
+#         self.all_data = jax.device_put(all_data_np, device).astype(jnp.uint8)
+
+#         self.num_classes = len(class_to_indices)
+
+#         max_samples_per_class = max(len(v) for v in class_to_indices.values())
+
+#         self.class_indicies = jax.device_put(
+#             jnp.full((self.num_classes, max_samples_per_class), -1, dtype=jnp.int32),
+#             device,
+#         )
+
+#         self.class_lengths = jax.device_put(
+#             jnp.zeros(self.num_classes, dtype=jnp.int32), device
+#         )
+
+#         for class_idx, (label, idx) in enumerate(sorted(class_to_indices.items())):
+#             num_samples = len(idx)
+#             self.class_indicies = self.class_indicies.at[class_idx, :num_samples].set(
+#                 jnp.array(idx, dtype=jnp.int32)
+#             )
+
+#             self.class_lengths = self.class_lengths.at[class_idx].set(num_samples)
+
+#         self.tasks = np.arange(self.num_classes).reshape((self.splits, -1))
+
+#         # if replay:
+#         #     self.buffer = jnp.zeros(shape=(self.replay_buffer_size, *self.all_data.shape[1:]), dtype=jnp.int32, device=device)
+#         #     self.buffer_labels = jnp.zeros(shape=(self.replay_buffer_size,), dtype=jnp.int32, device=device)
+#         #     self.buffer_start = 0
+#         #     self.buffer_end = self.buffer_size // self.splits
+
+#     @staticmethod
+#     @jax.jit
+#     def _norm(X, mean, std):
+#         return (X - mean) / std
+
+#     def __len__(self) -> int:
+#         return self.len
+
+#     def normalize(
 #         self,
-#         dataset: AvalancheDataset,
-#         batch_size: None | int = None,
+#         mean: tuple | float,
+#         std: tuple | float,
 #     ):
-#         collate_fn: Any | None = getattr(dataset, "collate_fn", None)
+#         self.mean = jnp.array(mean)  # typing:ignore
+#         self.std = jnp.array(std)  # typing:ignore
+#         self.mean = jnp.expand_dims(self.mean, axis=(0, 2, 3))
+#         self.std = jnp.expand_dims(self.std, axis=(0, 2, 3))
 
-#         if batch_size is None:
-#             batch_size = len(dataset)
-#         dataloader = DataLoader(
-#             dataset,
-#             batch_size=batch_size,
-#             collate_fn=collate_fn,
-#             shuffle=True,  # type: ignore
+#     def iters(self, task_n: int) -> int:
+#         task_idx = self.tasks[task_n]
+#         n = jnp.sum(self.class_lengths[task_idx]).item()
+#         return n // self.batch_size
+
+#     def update_batch_size(self, new_batch_size):
+#         self.batch_size = new_batch_size
+
+#     def _prepare_batch(self, X, y, device, *, key):
+#         # if self.replay and key is not None:
+#         #     idx = jax.random.permutation(key, jnp.sum(jnp.where(self.buffer_labels != 0, 1, 0)))
+#         #     X = jnp.concatenate([X, self.buffer[idx]])
+#         #     y = jnp.concatenate([y, self.buffer_labels[idx]])
+#         X = jax.jit(lambda x: x / 255.0)(X)
+#         if hasattr(self, "mean") and hasattr(self, "std"):
+#             X = self._norm(X, self.mean, self.std)
+#         X = jax.device_put(X, device)
+#         y = jax.device_put(y, device)
+#         return X.astype(self.dtype), y.astype(jnp.int32)
+
+#     def sample(self, task_n: int, *, key: PRNGKeyArray | None = None):
+
+#         task_idx = self.tasks[task_n]
+#         n = jnp.sum(self.class_lengths[task_idx]).item()
+#         class_idx = self.class_indicies[task_idx].reshape(-1)
+#         if self.multi_head:
+#             labels = np.repeat(np.arange(len(task_idx)), self.class_lengths[task_idx])
+#         else:
+#             labels = np.repeat(task_idx, self.class_lengths[task_idx])
+
+#         if key is not None:
+#             shuffle = jax.random.permutation(key=key, x=n)
+#             class_idx = class_idx[shuffle]
+#             labels = labels[shuffle]
+
+#         batches = n // self.batch_size
+#         class_idx = class_idx[: batches * self.batch_size].reshape(
+#             batches, self.batch_size
 #         )
+#         labels = labels[: batches * self.batch_size].reshape(batches, self.batch_size)
 
-#         all_x, all_y, all_tid = [], [], []
+#         device = jax.devices(self.iter_device)[0]
 
-#         for mbatch in dataloader:
-#             x, y, tid = mbatch[0], mbatch[1], mbatch[-1]
+#         def raw_generator():
+#             for i in range(batches):
+#                 X = self.all_data[class_idx[i]]
+#                 y = labels[i]
+#                 yield (X, y)
 
-#             poison_n = int(batch_size * self.pp)
+#         yield from self._prefetch(raw_generator(), device, self.buffer_size, key=key)
 
-#             if poison_n > 0:
-#                 p_x = x[:poison_n].detach()
-#                 p_y = y[:poison_n].detach()
-#                 labels = torch.unique(p_y)
-#                 for idx, c in enumerate(p_y):
-#                     if c == labels[0]:
-#                         p_y[idx] = labels[1]
-#                     else:
-#                         p_y[idx] = labels[0]
-
-#                 p_x, p_y = self.attack(self.flip_data, [p_x, p_y])
-#                 x[:poison_n] = p_x
-#                 y[:poison_n] = p_y
-#             all_x.append(x)
-#             all_y.append(y)
-#             all_tid.append(tid)
-
-#         all_x = torch.cat(all_x, dim=0)
-#         all_y = torch.cat(all_y, dim=0)
-#         all_tid = torch.cat(all_tid, dim=0)
-
-#         flat = FlatData([TensorDataset(all_x, all_y)], indices=None)
-#         # tensor_dataset.targets = all_y.tolist()
-
-#         tl_da = DataAttribute(all_tid, "targets_task_labels", use_in_getitem=True)
-#         t_da = DataAttribute(all_y.tolist(), "targets")
-
-#         return ClassificationDataset(
-#             datasets=[flat],
-#             data_attributes=[t_da, tl_da],
-#             transform_groups=dataset._flat_data._transform_groups,
-#         )
-
-#     def before_training_exp(self, strategy, *args, **kwargs) -> Any:
-#         if not self.target_training:
-#             return
-
-#         experience = strategy.experience
-
-#         if (
-#             self.start_after is not None
-#             and strategy.clock.train_exp_counter <= self.start_after
-#         ):
-#             return
-#         dataset = experience.dataset
-
-#         strategy.experience.dataset = self._poison_data(dataset)
-#         return strategy
-
-#     def after_training_exp(self, strategy, *args, **kwargs) -> Any:
-#         if not self.target_grad:
-#             return
-
-#         # dataset = strategy.experience.dataset
-#         t = strategy.clock.train_exp_counter
-#         # batch_size = strategy.train_mb_size
-#         if self.start_after is not None and t <= self.start_after:
-#             if self.flip_data is None and t == self.target_experiance:
-#                 self.flip_data = strategy.experience.dataset
-#             return
-
-#         if t <= self.start_after:
-#             return
-
-#         for p in strategy.plugins:
-#             if hasattr(p, "memory_x"):
-#                 device = p.memory_x[t].device
-#                 p_x = p.memory_x[t].detach().cpu().numpy()
-#                 p_y = p.memory_y[t].detach().cpu().numpy()
-#                 poison_n = int(p_x.shape[0] * self.pp)
-
-#                 p_x, p_y = self.attack(p_x[:poison_n], p_y[:poison_n])
-
-#                 p.memory_x[t][:poison_n] = torch.tensor(
-#                     p_x, dtype=p.memory_x[t].dtype, device=device
+#     def _prefetch(self, generator, device, buffer_size: int, *, key):
+#         with ThreadPoolExecutor(max_workers=self.workers) as executor:
+#             futures = []
+#             for item in generator:
+#                 if key is not None:
+#                     key, subkey = jax.random.split(key)
+#                 else:
+#                     subkey = None
+#                 futures.append(
+#                     executor.submit(self._prepare_batch, item[0], item[1], device, key=subkey)
 #                 )
-#                 p.memory_y[t][:poison_n] = torch.tensor(
-#                     p_y, dtype=p.memory_y[t].dtype, device=device
-#                 )
-#             elif hasattr(p, "buffer"):
-#                 strategy.experience.dataset = self._poison_data(
-#                     strategy.experience.dataset
-#                 )
-#             elif hasattr(p, "storage_policy"):
-#                 strategy.experience.dataset = self._poison_data(
-#                     strategy.experience.dataset
-#                 )
-#         return strategy
+#                 if len(futures) >= buffer_size:
+#                     yield futures.pop(0).result()
+#             while futures:
+#                 yield futures.pop(0).result()
 
+#     # def add_to_buffer(
+#     #     self,
+#     #     task_n: int,
+#     #     buffer_size: int,
+#     #     selection_method: Callable | None = None,
+#     #     *,
+#     #     key: PRNGKeyArray,
+#     # ):
+#     #     if not hasattr(self, 'buffer'):
+#     #         return
+#     #     if selection_method is None:
+#     #         selection_method = replay.random_selection
+#     #     sampled_data, sampled_labels = selection_method(self, task_n, buffer_size, key=key)
+#     #     sampled_data = jax.device_put(sampled_data, device = self.buffer.device)
+#     #     sampled_labels = jax.device_put(sampled_labels, device = self.buffer_labels.device)
+
+#     #     if self.buffer_start + sampled_data.shape[0] > self.replay_buffer_size:
+#     #         diff = self.replay_buffer_size - self.buffer_start
+#     #         sampled_data = sampled_data[:diff]
+#     #         sampled_labels = sampled_labels[:diff]
+#     #     self.buffer = self.buffer.at[self.buffer_start:self.buffer_end].set(sampled_data)
+#     #     self.buffer_labels = self.buffer_labels.at[self.buffer_start:self.buffer_end].set(sampled_labels)
+#     #     self.buffer_start = int(self.buffer_start + buffer_size)
+#     #     self.buffer_end = int(self.buffer_end + buffer_size)
