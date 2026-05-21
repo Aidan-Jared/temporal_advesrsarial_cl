@@ -15,11 +15,14 @@ from src.models.resnet32 import ResNet32
 
 
 def loss_fn(model, x, y, state, task, criterion, key):
-    key, *keys = jax.random.split(key, x.shape[0]+1)
+    key, *keys = jax.random.split(key, x.shape[0] + 1)
     keys = jnp.stack(keys)
-    logits, state = jax.vmap(model_forward, in_axes=(None, 0, None, None, 0), out_axes = (0, None), axis_name = "batch")(
-        model, x, state, task, keys
-    )
+    logits, state = jax.vmap(
+        model_forward,
+        in_axes=(None, 0, None, None, 0),
+        out_axes=(0, None),
+        axis_name="batch",
+    )(model, x, state, task, keys)
     # if task is not None and task > 0:
     #     jax.debug.print("{}", jnp.argmax(logits, axis=1))
     #     jax.debug.breakpoint()
@@ -28,6 +31,7 @@ def loss_fn(model, x, y, state, task, criterion, key):
     pred_y = jnp.argmax(logits, axis=1)
     acc = jnp.mean(y == pred_y)
     return loss, (acc, state)
+
 
 @eqx.filter_jit
 def get_gradients(
@@ -38,7 +42,8 @@ def get_gradients(
     *,
     key: PRNGKeyArray,
 ) -> PyTree:
-    grad_list = [] 
+    grad_list = []
+
     def step(model, x, y, state, t, key):
         loss, _ = loss_fn(model, x, y, state, t, criterion, key)
         return loss
@@ -55,7 +60,7 @@ def get_gradients(
         # y = jax.device_put(y, device=device)
         key, subkey = jax.random.split(key)
         grads = step(model, x, y, state, t, subkey)
-        if hasattr(grads, "heads"):            
+        if hasattr(grads, "heads"):
             grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
         grad_list.append(grads)
     return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
@@ -71,7 +76,7 @@ def update_memory(
 ) -> dict[int, tuple[Array, Array]]:
     key, subkey = jax.random.split(key)
     size = 0
-    for (x, y) in data.sample(task, key=subkey):
+    for x, y in data.sample(task, key=subkey):
         # device = jax.devices("cpu")[0]
         # x = jax.device_put(x, device=device)
         # y = jax.device_put(y, device=device)
@@ -101,17 +106,17 @@ def update_memory(
 
 
 def solve_qp(M: PyTree, grads: PyTree, memory_strength: float) -> PyTree:
-    if hasattr(grads, "heads"):            
+    if hasattr(grads, "heads"):
         grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
     g_leaves = jax.tree.leaves(grads)
     m_leaves = jax.tree.leaves(M)
     g_flat = jnp.concatenate([g.reshape(-1) for g in g_leaves])
     m_flat = jnp.concatenate([m.reshape(m.shape[0], -1) for m in m_leaves], axis=1)
-    
+
     t = m_flat.shape[0]
     eye = jnp.eye(t)
     h = jnp.full(t, memory_strength)
-    
+
     P = jnp.dot(m_flat, m_flat.T)
     P = 0.5 * (P + P.T) + 1e-3 * eye
     q = jnp.dot(m_flat, g_flat)
@@ -122,8 +127,11 @@ def solve_qp(M: PyTree, grads: PyTree, memory_strength: float) -> PyTree:
     sizes = [g.size for g in g_leaves]
     splits = np.cumsum(sizes[:-1]).tolist()
     v_star = jnp.split(v_star, splits)
-    return jax.tree_util.tree_unflatten(jax.tree.structure(grads), [v_star[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))])
-    
+    return jax.tree_util.tree_unflatten(
+        jax.tree.structure(grads),
+        [v_star[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))],
+    )
+
     # def solve_qp_single(m, g):
     #     shape = g.shape
     #     n = g.size
@@ -143,9 +151,9 @@ def solve_qp(M: PyTree, grads: PyTree, memory_strength: float) -> PyTree:
     #     v_star = jnp.dot(v, m) + g
     #     return v_star.reshape(shape).astype(jnp.float32)
 
-    # if hasattr(grads, "heads"):            
+    # if hasattr(grads, "heads"):
     #     grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
-        
+
     # return jax.tree.map(solve_qp_single, M, grads)
 
 
@@ -170,26 +178,30 @@ def AGEM(
     memory_strength: float,
     task: int,
 ) -> PyTree:
-   if task == 0:
+    if task == 0:
         return grads
-   else:
-        if hasattr(grads, "heads"):            
+    else:
+        if hasattr(grads, "heads"):
             grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
         g_leaves = jax.tree.leaves(grads)
         m_leaves = jax.tree.leaves(M)
         g_flat = jnp.concatenate([g.reshape(-1) for g in g_leaves])
         m_flat = jnp.concatenate([m.reshape(m.shape[0], -1) for m in m_leaves], axis=1)
-        
+
         m_flat = jnp.mean(m_flat, axis=0)
         dotg = jnp.dot(g_flat, m_flat)
         alpha = dotg / jnp.dot(m_flat, m_flat)
-        
+
         g_prog = jnp.where(dotg < 0, g_flat - alpha * m_flat, g_flat)
-        
+
         sizes = [g.size for g in g_leaves]
         splits = np.cumsum(sizes[:-1]).tolist()
         g_prog = jnp.split(g_prog, splits)
-        return jax.tree_util.tree_unflatten(jax.tree.structure(grads), [g_prog[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))])
+        return jax.tree_util.tree_unflatten(
+            jax.tree.structure(grads),
+            [g_prog[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))],
+        )
+
 
 @eqx.filter_jit
 def train_step(
@@ -206,27 +218,26 @@ def train_step(
     method_name,
     *,
     key,
-): 
-
+):
     (loss, (acc, state)), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
         model, x, y, state, task, criterion, key
     )
     grads = method[method_name](G, grads, memory_strength, task)
-    
+
     # jax.debug.print("{}", jax.tree_util.tree_leaves(grads))
     # jax.debug.breakpoint()
-    
-    updates, opt_state = optim.update(
-        grads, opt_state, eqx.filter(model, eqx.is_array)
-    )
+
+    updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     model = eqx.apply_updates(model, updates)
 
     return model, state, opt_state, loss, acc
+
 
 method = {
     "AGEM": AGEM,
     "GEM": GEM,
 }
+
 
 def GEM_train(
     model: ResNet18 | ResNet32,
@@ -251,10 +262,12 @@ def GEM_train(
     for task in range(tasks):
         task_loss = []
         task_acc = []
-        
+
         if task > 0 and hasattr(model, "add_head"):
-            model = model.add_head(len(trainloader.tasks[task]), key=key) #typing: ignore
-            
+            model = model.add_head(
+                len(trainloader.tasks[task]), key=key
+            )  # typing: ignore
+
         opt_state = optim.init(eqx.filter(model, eqx.is_array))
         model = eqx.nn.inference_mode(model, value=False)
         print("training task: ", task, "-" * 10)
@@ -266,11 +279,11 @@ def GEM_train(
                 # ncols=75,
             )
 
-            for step, (X, y) in pbar:
+            for step, (X, y, _, _, _) in pbar:
                 key, subkey = jax.random.split(key)
                 if task > 0:
                     G = get_gradients(model, state, criterion, memory, key=subkey)
-                
+
                 model, state, opt_state, loss, acc = train_step(
                     model,
                     X,
@@ -283,9 +296,9 @@ def GEM_train(
                     task,
                     memory_strength,
                     method_name,
-                    key = subkey,
+                    key=subkey,
                 )
-            
+
                 task_loss.append(loss)
                 task_acc.append(acc)
 
@@ -306,20 +319,17 @@ def GEM_train(
                     task_acc = []
 
         key, subkey1, subkey2 = jax.random.split(key, 3)
-        
-        
+
         print("eval", "-" * 10)
-        
-        loss_func = jax.tree_util.Partial(loss_fn, criterion = criterion)
+
+        loss_func = jax.tree_util.Partial(loss_fn, criterion=criterion)
         key, subkey = jax.random.split(key)
-        
-        res = eval(
-            model, state, tasks, testloader, loss_func, key=subkey
-        )
+
+        res = eval(model, state, tasks, testloader, loss_func, key=subkey)
         results.append(res)
-        
+
         memory = update_memory(trainloader, task, memory, task_samples, key=subkey1)
-                
+
         jax.clear_caches()
 
     return model, results

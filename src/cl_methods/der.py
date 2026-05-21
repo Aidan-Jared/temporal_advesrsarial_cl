@@ -1,3 +1,4 @@
+from buffer_selection import reservoir_sampling
 from typing import Callable
 
 import equinox as eqx
@@ -44,22 +45,21 @@ def der_loss(
     loss = jnp.mean(
         softmax_cross_entropy_with_integer_labels(logits[:batch_size], y[:batch_size])
     )
-    sloss = jax.lax.cond(
-        buffer_filled,
-        lambda: der_alpha
-        * jnp.mean(
-            (
-                logits[batch_size : batch_size + old_logits.shape[0] // 2]
-                - old_logits[: old_logits.shape[0] // 2]
-            )
-            ** 2
-        ),
-        lambda: 0.0,
-    )
-    loss += sloss
-    # jax.debug.print("{}", sloss)
     if beta != 0.0:
-        sloss = jax.lax.cond(
+        loss += jax.lax.cond(
+            buffer_filled,
+            lambda: der_alpha
+            * jnp.mean(
+                (
+                    logits[batch_size : batch_size + old_logits.shape[0] // 2]
+                    - old_logits[: old_logits.shape[0] // 2]
+                )
+                ** 2
+            ),
+            lambda: 0.0,
+        )
+        # jax.debug.print("{}", sloss)
+        loss += jax.lax.cond(
             buffer_filled,
             lambda: beta
             * jnp.mean(
@@ -72,8 +72,19 @@ def der_loss(
         )
         # jax.debug.print("{}", y[batch_size:])
         # jax.debug.breakpoint()
-        # jax.debug.print("{}", sloss)
-        loss += sloss
+    else:
+        loss += jax.lax.cond(
+            buffer_filled,
+            lambda: der_alpha
+            * jnp.mean(
+                (
+                    logits[batch_size :]
+                    - old_logits
+                )
+                ** 2
+            ),
+            lambda: 0.0,
+        )
     # jax.debug.breakpoint()
     return loss, (logits, acc, state)  # typing: ignore
 
@@ -170,7 +181,7 @@ def train_der(
                     indexes[:batch_size],
                     y[:batch_size],
                     logits[:batch_size],
-                    selection_method,
+                    selection_method=reservoir_sampling,
                     key=subkey2,
                 )
 
@@ -198,12 +209,14 @@ def train_der(
             for step, (x, y, indexes, task_n, old_logits) in enumerate(
                 testloader.sample(task, key=subkey)
             ):
+                key, *keys = jax.random.split(key, x.shape[0] + 1)
+                keys = jnp.stack(keys)
                 logits, _ = jax.vmap(
                     model_forward_jit,
-                    in_axes=(None, 0, None, None),
+                    in_axes=(None, 0, None, None, 0),
                     out_axes=(0, None),
                     axis_name="batch",
-                )(model, x, state, key)
+                )(model, x, state, task, keys)
 
                 eval_loss.append(softmax_cross_entropy_with_integer_labels(logits, y))
                 eval_acc.append(jnp.mean(jnp.argmax(logits, axis=1) == y))
@@ -224,4 +237,4 @@ def train_der(
         )
 
         results.append(res)
-    return results
+    return model, results

@@ -61,14 +61,16 @@ parser.add_argument(
 parser.add_argument("--lambda_", type=float, default=5e3)
 parser.add_argument("--mem_strength", type=float, default=0.5)
 parser.add_argument("--mem_size", type=int, default=256)
+parser.add_argument("--buffer_size", type=int, default=600)
+parser.add_argument("--replay_size", type=int, default=256)
 parser.add_argument("--der-alpha", type=float, default=0.5)
 parser.add_argument("--der-beta", type=float, default=0.5)
-parser.add_argument(
-    "--selection-method",
-    type=str,
-    default="reservoir_sampling",
-    choices=["reservoir_sampling", ""],
-)
+# parser.add_argument(
+#     "--selection-method",
+#     type=str,
+#     default="reservoir_sampling",
+#     choices=["reservoir_sampling", ""],
+# )
 
 parser.add_argument(
     "--poison_attacks", type=parse_list, default=["gaussian_noise", "shot_noise"]
@@ -190,7 +192,7 @@ def main():
 
         method = methods[args["method"]]
 
-        p_model, results = method(
+        model, results = method(
             model,
             state,
             trainloader,
@@ -231,7 +233,7 @@ def main():
             f"epochs{args['task_epochs']}_"
             f"lr{args['lr']}_"
             f"mem{args['mem_size']}_"
-            f"seed{'_'.join(map(str, args['seed']))}"
+            f"seed{seed}_"
             f"{method_suffix}"
             f".parquet"
         )

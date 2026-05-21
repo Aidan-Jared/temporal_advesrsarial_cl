@@ -42,8 +42,8 @@ def compute_importance(
                 in_axes=(None, 0, None, None, None),
                 out_axes=(0, None),
             )(model, x, state, task_n, key)
-            # loss = jax.nn.log_softmax(logits)
-            loss = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, y))
+            loss = jax.nn.log_softmax(logits)
+            # loss = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, y))
             return loss
 
         grads = eqx.filter_grad(loss_fn)(model, x, y, state, key)
@@ -188,6 +188,7 @@ def EWC_train(
     **kwargs,
 ):
     lambda_ = kwargs.get("lambda_", 5e5)
+    alpha = kwargs.get("alpha", 0.3)
     importances = None
     saved_params = None
     results = []
@@ -258,7 +259,7 @@ def EWC_train(
         results.append(res)
         key, subkey = jax.random.split(key)
         importance = compute_importance(model, state, task, trainloader, key=subkey)
-        importances = update_importances(importance, importances, task)
+        importances = update_importances(importance, importances, task, alpha)
 
         params, static = eqx.partition(model, eqx.is_inexact_array)
 
