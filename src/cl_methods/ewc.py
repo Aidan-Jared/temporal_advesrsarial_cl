@@ -259,6 +259,7 @@ def EWC_train(
         # model = eqx.combine(params, static)
         print("eval", "-" * 10)
         res = eval(model, state, tasks, testloader, loss_fn, key=key)
+        res["task_trained"] = task
         results.append(res)
         key, subkey = jax.random.split(key)
         importance = compute_importance(model, state, task, trainloader, key=subkey)

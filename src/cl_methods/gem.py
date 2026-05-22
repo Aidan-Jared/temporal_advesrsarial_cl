@@ -309,6 +309,7 @@ def GEM_train(
         key, subkey = jax.random.split(key)
 
         res = eval(model, state, tasks, testloader, loss_func, key=subkey)
+        res["task_trained"] = task
         results.append(res)
 
         memory = update_memory(trainloader, task, memory, task_samples, key=subkey1)

@@ -5,18 +5,17 @@ set -e
 
 uv run main.py \
   --seed 42\
-  --lr .03\
+  --lr 1e-3\
   --batch_size 32\
-  --task_epochs 25\
-  --data_set "CIFAR100"\
+  --task_epochs 50\
+  --data_set "CIFAR10"\
   --task_splits 5\
-  --dropout 0.0\
-  --transform True\
-  --task-shuffle False\
   --model "multiHeadResNet32"\
   --norm "[(0.5071, 0.4867, 0.4408),(0.2675, 0.2565, 0.2761)]"\
-  --method "EWC"\
-  --lambda_ 5e2\
+  --method "DER"\
+  --mem_size 200\
+  --alpha 0.1\
+  --der-beta 0.5\
   --poison_attacks '["gaussian_noise","shot_noise"]'\
   --poison_tasks "[0]"\
   --pcp .5\

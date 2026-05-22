@@ -229,5 +229,7 @@ def train_der(
             key=subkey,
         )
 
+        res["task_trained"] = task
+
         results.append(res)
     return model, results

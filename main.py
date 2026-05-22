@@ -6,6 +6,7 @@ import pandas as pd
 
 from src.cl_methods.ewc import EWC_train
 from src.cl_methods.gem import GEM_train
+from src.cl_methods.sgd import sgd_train
 from src.cl_methods.der import train_der
 from src.models.resnet18 import (
     singleHeadResNet18,
@@ -58,7 +59,7 @@ parser.add_argument("--task-shuffle", type=parse_bool, default="False")
 # CIFAR-100 (0.5071, 0.4867, 0.4408)(0.2675, 0.2565, 0.2761)
 
 parser.add_argument(
-    "--method", type=str, default="EWC", choices=["EWC", "GEM", "AGEM", "DER"]
+    "--method", type=str, default="EWC", choices=["SGD", "EWC", "GEM", "AGEM", "DER"]
 )
 parser.add_argument("--lambda_", type=float, default=5e3)
 parser.add_argument("--alpha", type=float, default=0.5, help="for der and ewc")
@@ -85,6 +86,7 @@ args = vars(parser.parse_args())
 
 methods = {
     "EWC": EWC_train,
+    "SGD": sgd_train,
     "GEM": partial(GEM_train, method_name="GEM"),
     "AGEM": partial(GEM_train, method_name="AGEM"),
     "DER": train_der,
@@ -219,10 +221,10 @@ def main():
         df = pd.concat([df, pd.DataFrame(results)])
 
         method_suffix = {
-            "EWC": f"_lambda{args['lambda_']}",
+            "EWC": f"_lambda{args['lambda_']}_a{args["alpha"]}",
             "GEM": f"_memstr{args['mem_strength']}",
             "AGEM": f"_memstr{args['mem_strength']}",
-            "DER": f"_a{args['der_alpha']}_b{args['der_beta']}",
+            "DER": f"_a{args['alpha']}_b{args['der_beta']}",
         }.get(args["method"], "")
 
         path = (

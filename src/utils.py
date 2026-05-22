@@ -143,6 +143,7 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
     model = eqx.nn.inference_mode(model, value=True)
     loss_fn = eqx.filter_jit(loss_fn)
     results = dict()
+    total_acc = []
     for p_task in range(tasks):
         key, subkey = jax.random.split(key)
         task_loss = []
@@ -171,7 +172,9 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
             "loss": np.mean(task_loss).item(),
             "acc": np.mean(task_acc).item(),
         }
-
+        total_acc.append(results[p_task]["acc"])
+    total_acc = np.mean(total_acc)
+    results["total_acc"] = total_acc
     return results
 
 
