@@ -104,5 +104,6 @@ def sgd_train(
             key=key,
         )
         res["task_trained"] = task
+        print(res)
         results.append(res)
-    return model, res
+    return model, results

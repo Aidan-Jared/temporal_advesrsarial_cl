@@ -173,7 +173,7 @@ def eval(model, state, tasks, testloader, loss_fn, *, key):
             "acc": np.mean(task_acc).item(),
         }
         total_acc.append(results[p_task]["acc"])
-    total_acc = np.mean(total_acc)
+    total_acc = np.mean(total_acc).item()
     results["total_acc"] = total_acc
     return results
 

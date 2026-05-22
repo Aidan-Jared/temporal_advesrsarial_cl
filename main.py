@@ -26,8 +26,10 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 def parse_list(arg):
     return ast.literal_eval(arg)
 
+
 def parse_bool(arg):
     return arg == "True"
+
 
 parser = argparse.ArgumentParser()
 
@@ -216,12 +218,13 @@ def main():
             "data_set": args["data_set"],
             **kwargs,
         }
+
         results = [{**r, **meta} for r in results]
 
         df = pd.concat([df, pd.DataFrame(results)])
 
         method_suffix = {
-            "EWC": f"_lambda{args['lambda_']}_a{args["alpha"]}",
+            "EWC": f"_lambda{args['lambda_']}_a{args['alpha']}",
             "GEM": f"_memstr{args['mem_strength']}",
             "AGEM": f"_memstr{args['mem_strength']}",
             "DER": f"_a{args['alpha']}_b{args['der_beta']}",

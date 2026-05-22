@@ -35,6 +35,7 @@ class BasicBlock(eqx.Module):
             kernel_size=3,
             stride=stride,
             padding=1,
+            use_bias=False,
             dtype=dtype,
             key=subkey1,
         )
@@ -44,6 +45,7 @@ class BasicBlock(eqx.Module):
             kernel_size=3,
             stride=1,
             padding=1,
+            use_bias=False,
             dtype=dtype,
             key=subkey2,
         )
@@ -76,12 +78,12 @@ class BasicBlock(eqx.Module):
         key: PRNGKeyArray | None = None,
     ) -> tuple[Array, PyTree]:
         out = self.conv1(x)
+        out = jax.nn.relu(out)
         out, state = self.bn1(out, state)
-        out = jax.nn.elu(out)
 
         out = self.conv2(out)
         out, state = self.bn2(out, state)
-        out = jax.nn.elu(out)
+        # out = jax.nn.elu(out)
 
         out = self.dropout(out, key=key)
 
@@ -154,7 +156,7 @@ class ResNet32(eqx.Module):
             hidden_channels * 2, num_blocks=5, stride=2, dtype=dtype, key=subkey3
         )
         self.layer3 = self._make_layer(
-            hidden_channels * 4, num_blocks=5, stride=2, dtype=dtype, key=subkey4
+            hidden_channels * 4, num_blocks=4, stride=2, dtype=dtype, key=subkey4
         )
 
         self.avgpool = eqx.nn.AdaptiveAvgPool2d((1, 1))
@@ -189,15 +191,17 @@ class ResNet32(eqx.Module):
         key: PRNGKeyArray,
     ):
         out = self.conv1(x)
+        out = jax.nn.relu(out)
         out, state = self.bn1(out, state)
-        out = jax.nn.elu(out)
 
         for block in self.layer1:
             key, subkey = jax.random.split(key)
             out, state = block(x=out, state=state, key=subkey)
+            out = jax.nn.relu(out)
         for block in self.layer2:
             key, subkey = jax.random.split(key)
             out, state = block(x=out, state=state, key=subkey)
+            out = jax.nn.relu(out)
         for block in self.layer3:
             key, subkey = jax.random.split(key)
             out, state = block(x=out, state=state, key=subkey)
