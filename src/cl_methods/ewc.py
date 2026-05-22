@@ -42,7 +42,8 @@ def compute_importance(
                 in_axes=(None, 0, None, None, None),
                 out_axes=(0, None),
             )(model, x, state, task_n, key)
-            loss = jax.nn.log_softmax(logits)
+            probs = jax.nn.log_softmax(logits)
+            loss = jnp.sum(probs[jnp.arange(len(y)), y])
             # loss = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, y))
             return loss
 

@@ -59,11 +59,11 @@ parser.add_argument(
     "--method", type=str, default="EWC", choices=["EWC", "GEM", "AGEM", "DER"]
 )
 parser.add_argument("--lambda_", type=float, default=5e3)
+parser.add_argument("--alpha", type=float, default=0.5, help = "for der and ewc")
 parser.add_argument("--mem_strength", type=float, default=0.5)
 parser.add_argument("--mem_size", type=int, default=256)
 parser.add_argument("--buffer_size", type=int, default=600)
 parser.add_argument("--replay_size", type=int, default=256)
-parser.add_argument("--der-alpha", type=float, default=0.5)
 parser.add_argument("--der-beta", type=float, default=0.5)
 # parser.add_argument(
 #     "--selection-method",
@@ -167,7 +167,7 @@ def main():
             "mem_size",
             "poison_attacks",
             "poison_tasks",
-            "der-alpha",
+            "alpha",
             "der-beta",
             "pcp",
             "pp",

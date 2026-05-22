@@ -76,7 +76,7 @@ def update_memory(
 ) -> dict[int, tuple[Array, Array]]:
     key, subkey = jax.random.split(key)
     size = 0
-    for x, y in data.sample(task, key=subkey):
+    for x, y, _, _, _ in data.sample(task, key=subkey):
         # device = jax.devices("cpu")[0]
         # x = jax.device_put(x, device=device)
         # y = jax.device_put(y, device=device)

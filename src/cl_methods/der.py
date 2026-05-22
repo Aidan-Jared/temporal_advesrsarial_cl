@@ -75,14 +75,7 @@ def der_loss(
     else:
         loss += jax.lax.cond(
             buffer_filled,
-            lambda: der_alpha
-            * jnp.mean(
-                (
-                    logits[batch_size :]
-                    - old_logits
-                )
-                ** 2
-            ),
+            lambda: der_alpha * jnp.mean((logits[batch_size:] - old_logits) ** 2),
             lambda: 0.0,
         )
     # jax.debug.breakpoint()
@@ -139,13 +132,13 @@ def train_der(
     key: PRNGKeyArray,
     **kwargs,
 ):
-    der_alpha = kwargs.get("der_alpha", 0.5)
+    der_alpha = kwargs.get("alpha", 0.5)
     beta = kwargs.get("der_beta", 0.5)
     batch_size = trainloader.batch_size
     results = []
     train_step_jit = eqx.filter_jit(train_step)
-    opt_state = optim.init(eqx.filter(model, eqx.is_array))
     for task in range(tasks):
+        opt_state = optim.init(eqx.filter(model, eqx.is_array))
         model = eqx.nn.inference_mode(model, False)
         print(f"training task {task}")
         print("-" * 50)
