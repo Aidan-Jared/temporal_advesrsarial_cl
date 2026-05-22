@@ -39,6 +39,7 @@ def get_gradients(
     state: State,
     criterion: Callable,
     memory: dict[int, tuple[Array, Array]],
+    method: str = "GEM",
     *,
     key: PRNGKeyArray,
 ) -> PyTree:
@@ -50,20 +51,24 @@ def get_gradients(
 
     step = eqx.filter_grad(step)
     key, subkey = jax.random.split(key)
-    for t in memory.keys():
-        x, y = memory[t]
-        # x = jnp.split(x, 8)
-        # y = jnp.split(y, 8)
-        # for x_batch, y_batch in zip(x,y):
-        # device = jax.local_devices()[0]
-        # x = jax.device_put(x, device=device)
-        # y = jax.device_put(y, device=device)
-        key, subkey = jax.random.split(key)
-        grads = step(model, x, y, state, t, subkey)
-        if hasattr(grads, "heads"):
-            grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
-        grad_list.append(grads)
-    return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
+    if method == "GEM":
+        for t in memory.keys():
+            x, y = memory[t]
+            key, subkey = jax.random.split(key)
+            grads = step(model, x, y, state, t, subkey)
+            if hasattr(grads, "heads"):
+                grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
+            grad_list.append(grads)
+        return jax.tree.map(lambda *g: jnp.stack(g, axis=0), *grad_list)
+    else:
+        all_x = jnp.concatenate([v[0] for v in memory.values()])
+        all_y = jnp.concatenate([v[1] for v in memory.values()])
+
+        idx = jax.random.choice(subkey, all_x.shape[0], (32,), False)
+        x, y = all_x[idx], all_y[idx]
+
+        grads = step(model, x, y, state, None, subkey)
+        return grads
 
 
 def update_memory(
@@ -131,30 +136,6 @@ def solve_qp(M: PyTree, grads: PyTree, memory_strength: float) -> PyTree:
         jax.tree.structure(grads),
         [v_star[i].reshape(g_leaves[i].shape) for i in range(len(g_leaves))],
     )
-
-    # def solve_qp_single(m, g):
-    #     shape = g.shape
-    #     n = g.size
-    #     t = m.shape[0]
-
-    #     m = m.reshape(t, n)
-    #     g = g.reshape(n)
-
-    #     G = jnp.eye(t)
-    #     h = jnp.full(t, memory_strength)
-    #     P = jnp.dot(m, m.T)
-    #     P = 0.5 * (P + P.T) + 1e-3 * G
-    #     q = jnp.dot(m, g) * -1
-    #     v, *_ = qpax.solve_qp(
-    #         Q=P, q=-q, h=-h, G=-G.T, A=jnp.zeros((0, t)), b=jnp.zeros(0)
-    #     )
-    #     v_star = jnp.dot(v, m) + g
-    #     return v_star.reshape(shape).astype(jnp.float32)
-
-    # if hasattr(grads, "heads"):
-    #     grads = eqx.tree_at(lambda m: m.heads, grads, replace_fn=lambda x: None)
-
-    # return jax.tree.map(solve_qp_single, M, grads)
 
 
 def GEM(
@@ -282,7 +263,9 @@ def GEM_train(
             for step, (X, y, _, _, _) in pbar:
                 key, subkey = jax.random.split(key)
                 if task > 0:
-                    G = get_gradients(model, state, criterion, memory, key=subkey)
+                    G = get_gradients(
+                        model, state, criterion, memory, method=method_name, key=subkey
+                    )
 
                 model, state, opt_state, loss, acc = train_step(
                     model,

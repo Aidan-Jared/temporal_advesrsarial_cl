@@ -25,6 +25,8 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 def parse_list(arg):
     return ast.literal_eval(arg)
 
+def parse_bool(arg):
+    return arg == "True"
 
 parser = argparse.ArgumentParser()
 
@@ -46,8 +48,8 @@ parser.add_argument(
 )
 
 parser.add_argument("--dropout", type=float, default=0.0)
-parser.add_argument("--transform", type=bool, default=True)
-parser.add_argument("--task-shuffle", type=bool, default=False)
+parser.add_argument("--transform", type=parse_bool, default="True")
+parser.add_argument("--task-shuffle", type=parse_bool, default="False")
 
 # Dataset Mean Std
 # MNIST (0.1307,) (0.3081,)
@@ -59,7 +61,7 @@ parser.add_argument(
     "--method", type=str, default="EWC", choices=["EWC", "GEM", "AGEM", "DER"]
 )
 parser.add_argument("--lambda_", type=float, default=5e3)
-parser.add_argument("--alpha", type=float, default=0.5, help = "for der and ewc")
+parser.add_argument("--alpha", type=float, default=0.5, help="for der and ewc")
 parser.add_argument("--mem_strength", type=float, default=0.5)
 parser.add_argument("--mem_size", type=int, default=256)
 parser.add_argument("--buffer_size", type=int, default=600)
@@ -113,7 +115,6 @@ def main():
     seeds = jax.random.randint(key, (args["model_runs"],), 1, 5000)
     df = pd.DataFrame()
     for seed in seeds:
-        print(type(seed))
         KEY = jax.random.PRNGKey(seed)
 
         dtype = jax.numpy.float32

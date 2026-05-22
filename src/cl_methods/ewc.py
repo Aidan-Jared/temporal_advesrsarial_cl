@@ -76,7 +76,9 @@ def compute_importance(
     # imp_magnitude = jax.tree_util.tree_leaves(importance)
     # jax.debug.print("mean importance: {x}", x = imp_magnitude)
     # jax.debug.breakpoint()
-    importance = jax.tree.map(lambda i: i / float(steps), importance)
+    importance = jax.tree.map(
+        lambda i: i / (float(steps) * data.batch_size), importance
+    )
 
     data.update_batch_size(old_batch_size)
 
@@ -90,7 +92,7 @@ def update_importances(
         return new_importance
 
     return jax.tree.map(
-        lambda n, o: ((1 - alpha) * o + (alpha) * n),
+        lambda n, o: (alpha * o + n),
         new_importance,
         importances,
     )

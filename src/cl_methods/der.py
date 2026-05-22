@@ -1,4 +1,3 @@
-from buffer_selection import reservoir_sampling
 from typing import Callable
 
 import equinox as eqx
@@ -15,6 +14,7 @@ from tqdm import tqdm
 
 from src.dataloader import CL_DataLoader
 from src.utils import eval, model_forward
+from src.buffer_selection import reservoir_sampling
 
 
 def der_loss(
