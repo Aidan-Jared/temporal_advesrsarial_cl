@@ -194,56 +194,26 @@ def main():
         # c_model = eqx.nn.make_with_state(ResNet18)(3, dtype=dtype, key=subkey4)
         optim = optax.sgd(learning_rate=LR, momentum=MOMENTUM)
         criterion = optax.softmax_cross_entropy_with_integer_labels
-
-        method = methods[args["method"]]
-
-        model, results = method(
-            model,
-            state,
-            trainloader,
-            testloader,
-            optim,
-            criterion,
-            EPOCHS,
-            SPLITS,
-            10,
-            key=subkey5,
-            **kwargs,
+    
+        method = methods[args.method]
+        
+        p_model, results = method(
+            p_model, state, trainloader, testloader, optim, criterion, args.task_epochs, args.task_splits, 1, key=subkey5, **kwargs
         )
-
-        meta = {
-            "seed": seed,
-            "model": args["model"],
-            "method": args["method"],
-            "data_set": args["data_set"],
-            **kwargs,
-        }
-
+        
+        # p_model, results = EWC_train(
+        #     p_model, state, trainloader, testloader, optim, criterion, args.task_epochs, args.task_splits, 1, key=subkey5
+        # )
+        # p_model, results = GEM_train(
+        #     p_model, state, trainloader, testloader, optim, criterion, task_epochs=1, tasks=5, print_every=10, method_name = "AGEM", memory_strength=10, task_samples = 10, key=subkey1
+        # )
+        meta = {"seed": seed, "model": args.model, "method": args.method, "data_set": args.data_set, "lr": args.lr, "epochs": args.task_epochs, "batch_size" : args.batch_size, **kwargs}
         results = [{**r, **meta} for r in results]
 
         df = pd.concat([df, pd.DataFrame(results)])
 
-        method_suffix = {
-            "EWC": f"_lambda{args['lambda_']}_a{args['alpha']}",
-            "GEM": f"_memstr{args['mem_strength']}",
-            "AGEM": f"_memstr{args['mem_strength']}",
-            "DER": f"_a{args['alpha']}_b{args['der_beta']}",
-        }.get(args["method"], "")
-
-        path = (
-            f"experiment_res/"
-            f"{args['method']}_"
-            f"{args['model']}_"
-            f"{args['data_set']}_"
-            f"tasks{args['task_splits']}_"
-            f"epochs{args['task_epochs']}_"
-            f"lr{args['lr']}_"
-            f"mem{args['mem_size']}_"
-            f"seed{seed}_"
-            f"{method_suffix}"
-            f".parquet"
-        )
-        df.to_parquet(path)
+    path = f"experiment_res/{args.method}_{args.model}_{args.data_set}_{args.lr}_{args.task_epochs}_{args.batch_size}_{args.lambda_}.parquet"
+    df.to_parquet(path)
     print(df)
 
 
