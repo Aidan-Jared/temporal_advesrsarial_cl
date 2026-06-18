@@ -210,12 +210,6 @@ def main():
         meta = {"seed": seed, "model": args.model, "method": args.method, "data_set": args.data_set, "lr": args.lr, "epochs": args.task_epochs, "batch_size" : args.batch_size, **kwargs}
         results = [{**r, **meta} for r in results]
 
-        df = pd.concat([df, pd.DataFrame(results)])
-
-    path = f"experiment_res/{args.method}_{args.model}_{args.data_set}_{args.lr}_{args.task_epochs}_{args.batch_size}_{args.lambda_}.parquet"
-    df.to_parquet(path)
-    print(df)
-
 
 if __name__ == "__main__":
     main()
